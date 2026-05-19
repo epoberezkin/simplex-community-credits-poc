@@ -2,6 +2,7 @@ node_modules
 dist
 build
 artifacts
+artifacts-pvm
 cache
 typechain-types
 *.log

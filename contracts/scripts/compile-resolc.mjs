@@ -47,7 +47,14 @@ const input = {
   language: 'Solidity',
   sources,
   settings: {
-    optimizer: { enabled: true, runs: 200 },
+    // NOTE: solc optimizer is disabled below via --disable-solc-optimizer.
+    // poseidon-solidity/PoseidonT3.sol has a ~50 KB inline-assembly block
+    // with thousands of precomputed BN254 constants. With the solc optimizer
+    // ON, solc hangs indefinitely on that file (was the cause of the earlier
+    // 30-min "empty solc error"). PVM bytecode size grows ~3× without the
+    // solc optimizer, but resolc's own LLVM optimizer (-O default `z`)
+    // recovers most of the loss.
+    optimizer: { enabled: false },
     outputSelection: {
       '*': { '*': ['abi', 'evm.bytecode'] },
     },
