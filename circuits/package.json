@@ -1,0 +1,19 @@
+{
+  "name": "circuits",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "node scripts/compile.mjs",
+    "setup": "node scripts/setup.mjs",
+    "verifiers": "node scripts/verifiers.mjs",
+    "build": "pnpm run compile && pnpm run setup && pnpm run verifiers",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "circomlib": "^2.0.5",
+    "circomlibjs": "^0.1.7",
+    "ffjavascript": "^0.3.0",
+    "snarkjs": "^0.7.5"
+  }
+}

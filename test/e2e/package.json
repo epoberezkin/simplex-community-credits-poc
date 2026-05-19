@@ -1,0 +1,17 @@
+{
+  "name": "e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node flow.test.mjs",
+    "test:chopsticks": "TARGET=chopsticks node flow.test.mjs"
+  },
+  "dependencies": {
+    "@community-credits/core": "workspace:*",
+    "contracts": "workspace:*",
+    "ethers": "^6.13.0",
+    "hardhat": "^2.22.0",
+    "poseidon-solidity": "^0.0.5"
+  }
+}

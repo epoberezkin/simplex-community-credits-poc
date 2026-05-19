@@ -1,0 +1,22 @@
+node_modules
+dist
+build
+artifacts
+cache
+typechain-types
+*.log
+.env
+.env.*
+!.env.example
+
+# Circuit build outputs
+circuits/build
+circuits/keys
+
+# Trusted setup artifacts (downloaded, large)
+ptau/*.ptau
+
+# Chopsticks state
+chopsticks/*.sqlite
+chopsticks/*.sqlite-*
+.idea/

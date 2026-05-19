@@ -1,0 +1,62 @@
+# Chopsticks fork of Paseo Asset Hub.
+#
+# This fork lets us:
+#   - exercise the pallet_assets stablecoin + ERC20-precompile path
+#   - replay against the same runtime + storage shape the real network has
+#   - prefund test accounts (Alice + a buyer/relay EOA derived from the
+#     PASEO_DEV_MNEMONIC env var or the well-known Hardhat #0 EVM key) so the
+#     E2E harness can sign txs without faucet wait
+#
+# Usage:
+#   npx @acala-network/chopsticks --config chopsticks/paseo-asset-hub.yml
+#
+# The eth-rpc bridge sits in front of the substrate RPC and translates
+# eth_* JSON-RPC calls into pallet-revive extrinsics. For the PoC we run it
+# separately (see chopsticks/run.sh).
+
+endpoint:
+  - wss://asset-hub-paseo.ibp.network
+  - wss://asset-hub-paseo.dotters.network
+  - wss://asset-hub-paseo-rpc.n.dwellir.com
+  - wss://sys.turboflakes.io/asset-hub-paseo
+mock-signature-host: true
+db: ./chopsticks/paseo-asset-hub.sqlite
+block: ${env.PASEO_ASSET_HUB_BLOCK_NUMBER}
+runtime-log-level: 5
+
+import-storage:
+  System:
+    Account:
+      # Alice  (sudo, prefunded)
+      - - - 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+      # Bob
+      - - - 5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+
+  Assets:
+    Account:
+      # tUSDC asset id 1984 — same convention as USDT on Asset Hub
+      - [ [ 1984, 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY ], { balance: 1000000000000 } ]
+      - [ [ 1984, 5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty ], { balance: 1000000000000 } ]
+    Asset:
+      - [ [ 1984 ], {
+          owner: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,
+          issuer: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,
+          admin: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,
+          freezer: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,
+          supply: 2000000000000,
+          deposit: 1000000000000,
+          minBalance: 1,
+          isSufficient: true,
+          accounts: 2,
+          sufficients: 0,
+          approvals: 0,
+          status: 'Live'
+        } ]
+    Metadata:
+      - [ [ 1984 ], { deposit: 0, name: '0x546573742055534443', symbol: '0x7455534443', decimals: 6, isFrozen: false } ]

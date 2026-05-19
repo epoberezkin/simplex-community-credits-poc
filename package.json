@@ -1,0 +1,16 @@
+{
+  "name": "simplex-community-credits-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:circuits": "cd circuits && pnpm run build",
+    "build:contracts": "cd contracts && pnpm run build",
+    "build:core": "cd packages/core && pnpm run build",
+    "test:e2e": "cd test/e2e && pnpm run test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.9"
+}

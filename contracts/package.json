@@ -1,0 +1,21 @@
+{
+  "name": "contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "build": "hardhat compile",
+    "node": "hardhat node"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.0",
+    "dotenv": "^17.0.0"
+  },
+  "dependencies": {
+    "@community-credits/core": "workspace:*",
+    "poseidon-solidity": "^0.0.5"
+  }
+}
