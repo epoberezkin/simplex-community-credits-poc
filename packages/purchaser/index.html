@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Community Credits — Purchaser</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 480px; margin: 1rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.2rem; }
+      label { display: block; margin: 0.5rem 0 0.2rem; font-size: 0.9rem; }
+      input { width: 100%; padding: 0.4rem; box-sizing: border-box; }
+      button { padding: 0.5rem 1rem; margin-top: 0.5rem; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .row { display: flex; gap: 0.5rem; }
+      .row > * { flex: 1; }
+      .card { border: 1px solid #ccc; padding: 1rem; border-radius: 8px; margin: 1rem 0; }
+      pre { background: #f5f5f5; padding: 0.5rem; overflow-x: auto; font-size: 0.75rem; }
+      #qr { display: block; margin: 0.5rem auto; }
+      .err { color: #c33; }
+      .ok  { color: #393; }
+      .mut { color: #666; font-size: 0.85rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Dapp A — Purchaser</h1>
+    <p class="mut">Buy a community-credits voucher with tUSDC. Generates a per-voucher key, proves <code>create</code>, signs <code>approve</code> + <code>buyAndCreate</code>.</p>
+
+    <section id="connect" class="card">
+      <h2 style="font-size:1rem">Wallet</h2>
+      <div id="wallets"></div>
+      <p id="walletStatus" class="mut">Not connected</p>
+    </section>
+
+    <section id="buy" class="card" hidden>
+      <h2 style="font-size:1rem">Buy voucher</h2>
+      <label>Value (tUSDC, 6 decimals)
+        <input id="value" type="number" value="1000" min="1" />
+      </label>
+      <label>Expiry epoch
+        <input id="expiryEpoch" type="number" value="100" min="1" />
+      </label>
+      <button id="goBuy">Prove + buyAndCreate</button>
+      <div id="buyStatus" class="mut"></div>
+    </section>
+
+    <section id="result" class="card" hidden>
+      <h2 style="font-size:1rem">Hand off to chat</h2>
+      <canvas id="qr"></canvas>
+      <p><a id="chatLink" target="_blank" rel="noreferrer">Open in chat dapp →</a></p>
+      <pre id="noteDump"></pre>
+    </section>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

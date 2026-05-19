@@ -1,4 +1,6 @@
-// Public surface for `@community-credits/core`.
+// Public surface for `@community-credits/core` — DOM-free + Node-free.
+// Anything Node-specific (proof.js with snarkjs+fs) is reached via subpath
+// imports so browser bundlers don't pull node:fs / node:path into the bundle.
 
 export { poseidon, poseidonHash, field } from './poseidon.js';
 export {
@@ -26,4 +28,4 @@ export {
   buildRedeemLink,
   parseDeepLink,
 } from './handoff.js';
-export { proveCreate, proveAssign, proveRedeem, verify, formatProofForSolidity } from './proof.js';
+export { discoverProviders, connectEvm } from './eip6963.js';

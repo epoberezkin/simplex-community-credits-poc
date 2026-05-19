@@ -1,0 +1,23 @@
+{
+  "name": "@community-credits/chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5174",
+    "build": "vite build",
+    "preview": "vite preview --port 5174"
+  },
+  "dependencies": {
+    "@community-credits/core": "workspace:*",
+    "@msgpack/msgpack": "^3.0.0",
+    "ethers": "^6.13.0",
+    "idb-keyval": "^6.2.1",
+    "qrcode": "^1.5.4",
+    "qr-scanner": "^1.4.2",
+    "snarkjs": "^0.7.5"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}

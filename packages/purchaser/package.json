@@ -1,0 +1,21 @@
+{
+  "name": "@community-credits/purchaser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --port 5173"
+  },
+  "dependencies": {
+    "@community-credits/core": "workspace:*",
+    "@msgpack/msgpack": "^3.0.0",
+    "ethers": "^6.13.0",
+    "qrcode": "^1.5.4",
+    "snarkjs": "^0.7.5"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}

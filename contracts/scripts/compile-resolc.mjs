@@ -1,15 +1,16 @@
 #!/usr/bin/env node
-// Compile every Solidity source we deploy to pallet-revive using the resolc
-// compiler. resolc emits PVM (PolkaVM) bytecode that pallet_revive executes
-// directly; standard EVM bytecode from solc/hardhat is rejected by the chain.
+// Compile every Solidity source we deploy to pallet-revive using resolc,
+// which emits PVM (PolkaVM) bytecode that pallet_revive executes natively.
+// Standard EVM bytecode from solc/hardhat is rejected by the chain.
 //
-// Output: artifacts-pvm/{ContractName}.json   { abi, bin, linkReferences }
+// Pass sources to resolc via standard-JSON with file URLs (not inline content)
+// so stdin stays small and doesn't deadlock on large inputs.
 //
-// We feed sources via resolc's standard JSON mode so import resolution + the
-// library link-reference markers come back in the same shape Hardhat emits.
+// Output: artifacts-pvm/<ContractName>.json   { abi, bytecode, linkReferences }
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, openSync, closeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,7 +22,6 @@ const NODE_MODULES = resolve(ROOT, 'node_modules');
 
 mkdirSync(OUT, { recursive: true });
 
-// Discover .sol files under contracts/ (recursive).
 function walk(dir) {
   const out = [];
   for (const e of readdirSync(dir)) {
@@ -34,13 +34,13 @@ function walk(dir) {
 
 const sources = {};
 for (const f of walk(CONTRACTS)) {
-  sources[relative(ROOT, f)] = { content: readFileSync(f, 'utf8') };
+  sources[relative(ROOT, f)] = { urls: [f] };
 }
-// Also pull in any node_modules imports we use directly.
+// External imports come via inline content — solc's allow-paths rules block
+// node_modules even when listed.
 const externalImports = ['poseidon-solidity/PoseidonT3.sol'];
 for (const imp of externalImports) {
-  const p = resolve(NODE_MODULES, imp);
-  sources[imp] = { content: readFileSync(p, 'utf8') };
+  sources[imp] = { content: readFileSync(resolve(NODE_MODULES, imp), 'utf8') };
 }
 
 const input = {
@@ -49,28 +49,36 @@ const input = {
   settings: {
     optimizer: { enabled: true, runs: 200 },
     outputSelection: {
-      '*': {
-        '*': ['abi', 'evm.bytecode'],
-      },
+      '*': { '*': ['abi', 'evm.bytecode'] },
     },
   },
 };
 
 console.log('> resolc --standard-json');
-const stdoutBuf = execFileSync('resolc', ['--standard-json'], {
-  input: JSON.stringify(input),
-  maxBuffer: 200 * 1024 * 1024,
-});
-const result = JSON.parse(stdoutBuf.toString());
+// Write input to a tmpfile so we don't deadlock on the input pipe — large
+// inline verifier sources blow past the default 64 KB pipe buffer.
+const inFile = resolve(tmpdir(), `resolc-in-${process.pid}.json`);
+const outFile = resolve(tmpdir(), `resolc-out-${process.pid}.json`);
+writeFileSync(inFile, JSON.stringify(input));
+const inFd = openSync(inFile, 'r');
+const outFd = openSync(outFile, 'w');
+try {
+  execFileSync(
+    'resolc',
+    ['--standard-json', '--allow-paths', `${CONTRACTS},${NODE_MODULES}`],
+    { stdio: [inFd, outFd, 'inherit'] },
+  );
+} finally {
+  closeSync(inFd);
+  closeSync(outFd);
+}
+const result = JSON.parse(readFileSync(outFile, 'utf8'));
 
 if (result.errors) {
   const fatal = result.errors.filter((e) => e.severity === 'error');
   if (fatal.length) {
     for (const e of fatal) console.error(e.formattedMessage || e.message);
     process.exit(1);
-  }
-  for (const e of result.errors) {
-    if (process.env.VERBOSE) console.warn(e.formattedMessage || e.message);
   }
 }
 

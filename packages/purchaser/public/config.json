@@ -1,0 +1,9 @@
+{
+  "ethRpcUrl": "http://127.0.0.1:8545",
+  "chainIdHex": "0x7a69",
+  "chainName": "Hardhat Local",
+  "chatBaseUrl": "http://localhost:5174/",
+  "relayBaseUrl": "http://localhost:5175/",
+  "poolAddress": "0x0000000000000000000000000000000000000000",
+  "stablecoinAddress": "0x0000000000000000000000000000000000000000"
+}

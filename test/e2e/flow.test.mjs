@@ -17,9 +17,6 @@ import {
   randomFieldElement,
   IncrementalMerkleTree,
   redeemerHashFromId,
-  proveCreate,
-  proveAssign,
-  proveRedeem,
   encodeNote,
   decodeNote,
   encodeAssign,
@@ -31,6 +28,7 @@ import {
   buildRedeemLink,
   parseDeepLink,
 } from '@community-credits/core';
+import { proveCreate, proveAssign, proveRedeem } from '@community-credits/core/proof';
 
 import { deployAll } from './deploy.mjs';
 

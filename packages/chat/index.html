@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Community Credits — Chat</title>
+    <style>
+      :root { --fg:#111; --mut:#666; --bg:#fff; --line:#ddd; }
+      * { box-sizing: border-box; }
+      body { font-family: system-ui, sans-serif; max-width: 420px; margin: 0 auto; padding: 0.5rem; color: var(--fg); }
+      header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.5rem; border-bottom: 1px solid var(--line); }
+      header h1 { font-size: 1.1rem; margin: 0; }
+      nav button { padding: 0.3rem 0.6rem; font-size: 0.85rem; }
+      nav button.active { background: #333; color: white; }
+      input, button, select { padding: 0.4rem; font-size: 0.9rem; width: 100%; margin: 0.3rem 0; }
+      .card { border: 1px solid var(--line); padding: 0.7rem; border-radius: 8px; margin: 0.6rem 0; }
+      .note-row { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px dashed var(--line); font-size: 0.9rem; }
+      .mut { color: var(--mut); font-size: 0.85rem; }
+      .err { color: #c33; }
+      .ok { color: #393; }
+      pre { background: #f5f5f5; padding: 0.5rem; font-size: 0.7rem; overflow-x: auto; }
+      canvas#qr { display: block; margin: 0.5rem auto; }
+      /* Dapp B has NO signer — no wallet UI ever appears. */
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Chat</h1>
+      <nav>
+        <button id="modeUser" class="active">User</button>
+        <button id="modeAdmin">Community admin</button>
+      </nav>
+    </header>
+
+    <section id="viewMyNotes" class="card">
+      <h2 style="font-size:1rem;margin:0">My vouchers</h2>
+      <p class="mut">Held in this profile. Import via deep link or QR scan.</p>
+      <button id="scanBtn">📷 Scan QR</button>
+      <video id="scanVideo" hidden style="width:100%;border-radius:8px;"></video>
+      <div id="notesList"></div>
+    </section>
+
+    <section id="viewAssign" class="card" hidden>
+      <h2 style="font-size:1rem;margin:0">Assign to community</h2>
+      <label class="mut">Note <select id="assignNote"></select></label>
+      <label class="mut">Community id (hex) <input id="communityId" placeholder="0xa11ce" /></label>
+      <label class="mut">Community owner pkHash (hex)
+        <input id="destOwnerPk" placeholder="hex pkHash from the community admin" />
+      </label>
+      <label class="mut">Dest value <input id="destValue" type="number" value="100" /></label>
+      <button id="proveAssignBtn">Prove + open in relay</button>
+      <p id="assignStatus" class="mut"></p>
+      <div id="assignResult" hidden>
+        <canvas id="assignQR"></canvas>
+        <a id="assignLink" target="_blank">Open relay link →</a>
+      </div>
+    </section>
+
+    <section id="viewAdmin" class="card" hidden>
+      <h2 style="font-size:1rem;margin:0">Community inbox</h2>
+      <p class="mut">Received notes for this community admin profile.</p>
+      <div id="adminNotes"></div>
+
+      <h3 style="font-size:0.95rem">Redeem</h3>
+      <label class="mut">Note <select id="redeemNote"></select></label>
+      <label class="mut">Operator address (0x…) <input id="operatorAddr" /></label>
+      <label class="mut">Redeem value <input id="redeemValue" type="number" value="50" /></label>
+      <button id="proveRedeemBtn">Prove + open in relay</button>
+      <p id="redeemStatus" class="mut"></p>
+      <div id="redeemResult" hidden>
+        <canvas id="redeemQR"></canvas>
+        <a id="redeemLink" target="_blank">Open relay link →</a>
+      </div>
+    </section>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
