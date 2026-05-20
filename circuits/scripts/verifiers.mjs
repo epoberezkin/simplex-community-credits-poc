@@ -18,6 +18,7 @@ const CIRCUITS = [
   { name: 'create', contract: 'CreateVerifier' },
   { name: 'assign', contract: 'AssignVerifier' },
   { name: 'redeem', contract: 'RedeemVerifier' },
+  { name: 'checkpoint', contract: 'CheckpointVerifier' },
 ];
 
 // Bundled snarkjs Groth16 verifier template (it lives inside the package).

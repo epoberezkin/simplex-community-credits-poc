@@ -12,9 +12,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 const BUILD = resolve(ROOT, 'build');
 const KEYS = resolve(ROOT, 'keys');
-const PTAU = resolve(ROOT, '..', 'ptau', 'powersOfTau28_hez_final_14.ptau');
+const PTAU = resolve(ROOT, '..', 'ptau', 'powersOfTau28_hez_final_17.ptau');
 
-const CIRCUITS = ['create', 'assign', 'redeem'];
+// The checkpoint circuit is ~36 K constraints (batch B=4 + 20-deep Merkle),
+// needs ptau-17 (~64 K constraint coverage). create/assign/redeem are
+// unchanged from baseline (≤7 K constraints) and would fit smaller ptau,
+// but we use one file for all to keep the script simple.
+const CIRCUITS = ['create', 'assign', 'redeem', 'checkpoint'];
 
 if (!existsSync(PTAU)) {
   throw new Error(`Missing ${PTAU}. Re-run ptau download.`);

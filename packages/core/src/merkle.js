@@ -81,4 +81,46 @@ export class IncrementalMerkleTree {
     const root = level.length ? level[0] : zeros[this.depth];
     return { pathElements, pathIndices, root };
   }
+
+  // Canonical sibling path for inserting at position `insertIndex` (which
+  // must equal the next free position, i.e. this.leaves.length). Returns the
+  // same pathElements that the on-chain frontier would have at this moment.
+  // After calling this, the leaf can be inserted with `await this.insert(leaf)`
+  // and the resulting root computed via `await this.root()`.
+  async appendPath(insertIndex) {
+    if (insertIndex !== this.leaves.length) {
+      throw new Error(`appendPath only valid at nextIndex; got ${insertIndex}, expected ${this.leaves.length}`);
+    }
+    const zeros = await this._zeros();
+    const pathElements = [];
+    // Build the path level-by-level. For each level d:
+    //   if bit d of insertIndex is 0, the new slot is the LEFT child →
+    //     sibling is the RIGHT child, which is the empty zero at level d.
+    //   if bit d of insertIndex is 1, the new slot is the RIGHT child →
+    //     sibling is the LEFT child, which is the canonical "filled subtree"
+    //     hash at level d (Tornado/Semaphore terminology).
+    let level = this.leaves.slice();
+    let idx = insertIndex;
+    for (let d = 0; d < this.depth; d++) {
+      const isRight = idx & 1;
+      if (isRight) {
+        // sibling is left = level[idx - 1] (definitely exists because we're
+        // at position idx and the new slot at idx is currently zero).
+        pathElements.push(level[idx - 1] ?? zeros[d]);
+      } else {
+        // sibling is right = zero (nothing past idx exists yet).
+        pathElements.push(zeros[d]);
+      }
+      // Hash forward to next level for the next iteration.
+      const next = [];
+      for (let i = 0; i < level.length; i += 2) {
+        const l = level[i];
+        const r = i + 1 < level.length ? level[i + 1] : zeros[d];
+        next.push(await poseidonHash([l, r]));
+      }
+      level = next;
+      idx = idx >> 1;
+    }
+    return pathElements;
+  }
 }

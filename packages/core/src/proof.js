@@ -26,13 +26,16 @@ function loadVkey(name) {
   return JSON.parse(readFileSync(pathOf(name, 'vkey'), 'utf8'));
 }
 
-// Bigint-keys → string-keys recursively (snarkjs wants strings).
+// Bigint values → strings recursively (snarkjs wants strings at every
+// nested array level, e.g. multi-dim input arrays).
+function biToStr(v) {
+  if (Array.isArray(v)) return v.map(biToStr);
+  return v.toString();
+}
+
 function biToStrInputs(o) {
   const out = {};
-  for (const [k, v] of Object.entries(o)) {
-    if (Array.isArray(v)) out[k] = v.map((x) => x.toString());
-    else out[k] = v.toString();
-  }
+  for (const [k, v] of Object.entries(o)) out[k] = biToStr(v);
   return out;
 }
 
@@ -75,3 +78,4 @@ export async function verify(name, proof, publicSignals) {
 export const proveCreate = (input) => prove('create', input);
 export const proveAssign = (input) => prove('assign', input);
 export const proveRedeem = (input) => prove('redeem', input);
+export const proveCheckpoint = (input) => prove('checkpoint', input);

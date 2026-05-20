@@ -11,7 +11,7 @@ const ROOT = resolve(__dirname, '..');
 const SRC = resolve(ROOT, 'src');
 const OUT = resolve(ROOT, 'build');
 
-const CIRCUITS = ['create', 'assign', 'redeem'];
+const CIRCUITS = ['create', 'assign', 'redeem', 'checkpoint'];
 
 mkdirSync(OUT, { recursive: true });
 

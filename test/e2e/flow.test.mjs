@@ -27,8 +27,9 @@ import {
   buildAssignLink,
   buildRedeemLink,
   parseDeepLink,
+  buildCheckpointInput,
 } from '@community-credits/core';
-import { proveCreate, proveAssign, proveRedeem } from '@community-credits/core/proof';
+import { proveCreate, proveAssign, proveRedeem, proveCheckpoint } from '@community-credits/core/proof';
 
 import { deployAll } from './deploy.mjs';
 
@@ -187,10 +188,34 @@ async function main() {
   await (await tUsdc.connect(admin).mint(buyerAddr, 1_000_000n, callOpts)).wait();
   await (await pool.connect(admin).registerOperator(relayAddr, callOpts)).wait();
 
-  // Local mirror tree the chat dapp would rebuild from events.
+  // Local mirror of the *checkpointed* tree state. Updated only after a
+  // checkpoint is submitted on-chain. The chat dapp rebuilds the same
+  // mirror by replaying VoucherCreated / Assigned / Redeemed events up to
+  // the latest Checkpointed event.
   const mirror = new IncrementalMerkleTree();
+  // Commitments streamed but not yet rolled into a checkpoint.
+  const pendingStream = []; // bigint[]
   const buyerStore = new NoteStore();
   const communityStore = new NoteStore();
+
+  // Drain the pendingStream by submitting one checkpoint per commitment
+  // (PoC uses BATCH=1; production should batch B≥8 — see docs/gas-design.md
+  // §3b for the design and §5 for the cost analysis).
+  async function drainCheckpoints() {
+    while (pendingStream.length > 0) {
+      const oldCount = Number(await pool.checkpointedCount());
+      const cm = pendingStream[0];
+      const { input } = await buildCheckpointInput({ mirror, cm, oldCount });
+      const { proofFlat } = await proveCheckpoint(input);
+      const { pA, pB, pC } = unpackProof(proofFlat);
+      await (
+        await pool.connect(relay).checkpoint(
+          input.newRoot, input.newCount, pA, pB, pC, callOpts,
+        )
+      ).wait();
+      pendingStream.shift();
+    }
+  }
 
   // ----------------------------------------------------------- buy/mint ---
 
@@ -230,7 +255,8 @@ async function main() {
     assertEq(poolBal, value, 'pool balance');
     assertEq(await tUsdc.balanceOf(buyerAddr), 1_000_000n - value, 'buyer balance');
 
-    // Find emitted leaf index from the VoucherCreated log.
+    // Find emitted leaf index from the VoucherCreated log (the stream
+    // position; not yet a tree leaf index — that's set at checkpoint time).
     const ev = txr.logs
       .map((l) => {
         try { return pool.interface.parseLog(l); } catch { return null; }
@@ -238,7 +264,9 @@ async function main() {
       .find((p) => p && p.name === 'VoucherCreated');
     assertOk(ev, 'VoucherCreated event');
     const leafIndex = Number(ev.args.leafIndex);
-    await mirror.insert(cm);
+    // cm is in the stream — NOT in the mirror yet. drainCheckpoints below
+    // will roll it into the tree.
+    pendingStream.push(cm);
 
     // Buyer hands the note to chat via deep link.
     importLink = buildImportLink('https://chat.example/', {
@@ -251,6 +279,11 @@ async function main() {
       ownerPkHash: buyerKp.ownerPkHash, randomness, value, expiryEpoch,
       assigned: 0, redeemerHash: 0n, scope: 'self', spent: false,
     });
+  });
+
+  await step('checkpoint after buy', async () => {
+    await drainCheckpoints();
+    assertEq(await pool.checkpointedCount(), 1n, 'checkpointedCount=1');
   });
 
   // ---------------------------- chat imports note from deep link ----------
@@ -339,17 +372,22 @@ async function main() {
     ).wait();
     assertOk(txr.status === 1, 'assign tx status');
 
-    // Mirror the chain inserts in our local tree.
-    await mirror.insert(b.cmDest);
-    await mirror.insert(b.cmChange);
+    // Both new commitments land in the stream. They'll be folded into the
+    // tree by the next drainCheckpoints() pass; record their eventual leaf
+    // positions now (Assigned event includes destLeafIndex / changeLeafIndex
+    // = the stream positions).
+    const ev = txr.logs
+      .map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
+      .find((p) => p && p.name === 'Assigned');
+    assertOk(ev, 'Assigned event');
+    const destLeafIndex = Number(ev.args.destLeafIndex);
+    const changeLeafIndex = Number(ev.args.changeLeafIndex);
+    pendingStream.push(b.cmDest, b.cmChange);
 
     // Update the chat store: mark old note spent, add change to buyer.
     buyerStore.markSpent(cm.toString());
-    const destLeaf = await pool.nextLeafIndex() - 1n;
-    const destLeafIndex = Number(destLeaf) - 1; // dest was inserted first
-    const changeLeafIndex = Number(destLeaf);   // change second
     buyerStore.add({
-      commitment: cmChange.toString(), leafIndex: changeLeafIndex - 1,
+      commitment: cmChange.toString(), leafIndex: changeLeafIndex,
       sk: buyerKp.sk, ownerPkHash: buyerKp.ownerPkHash, randomness: changeRandomness,
       value: changeValue, expiryEpoch, assigned: 0, redeemerHash: 0n,
       scope: 'self', spent: false,
@@ -360,7 +398,11 @@ async function main() {
       value: destValue, expiryEpoch, assigned: 1, redeemerHash,
       scope: 'self', spent: false,
     });
-    void destLeaf;
+  });
+
+  await step('checkpoint after assign', async () => {
+    await drainCheckpoints();
+    assertEq(await pool.checkpointedCount(), 3n, 'checkpointedCount=3');
   });
 
   await step('double-spend assign reverts', async () => {
@@ -375,9 +417,12 @@ async function main() {
           .assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC, callOpts)
       ).wait();
     } catch (e) {
-      threw = /pool\/nullifier/.test(e.message);
+      // Hardhat surfaces the explicit "pool/nullifier" revert string;
+      // pallet-revive/eth-rpc collapses it to a generic CALL_EXCEPTION
+      // ("transaction execution reverted") without the reason. Accept both.
+      threw = /pool\/nullifier|execution reverted/.test(e.message);
     }
-    assertOk(threw, 'expected pool/nullifier revert');
+    assertOk(threw, 'expected double-spend revert');
     // The eth_estimateGas pre-flight on the failed tx burned a phantom nonce
     // in NonceManager's local counter; resync from chain so the next tx
     // doesn't fall behind.
@@ -456,10 +501,18 @@ async function main() {
     ).wait();
     assertOk(txr.status === 1, 'redeem tx status');
 
-    await mirror.insert(b.cmChange);
+    // cmChange goes into the stream; the next drainCheckpoints() will fold
+    // it into the tree. Not necessary for this test (no further spends),
+    // but flush it anyway to exercise the post-redeem checkpoint path.
+    pendingStream.push(b.cmChange);
 
     assertEq(await pool.credit(relayAddr), redeemValue, 'credit balance');
     assertEq(await pool.spent(Number(expiryEpoch)), redeemValue, 'spent[epoch]');
+  });
+
+  await step('checkpoint after redeem', async () => {
+    await drainCheckpoints();
+    assertEq(await pool.checkpointedCount(), 4n, 'checkpointedCount=4');
   });
 
   await step('Dapp C — operator withdraw', async () => {

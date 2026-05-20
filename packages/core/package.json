@@ -13,6 +13,7 @@
     "./poseidon": "./src/poseidon.js",
     "./crypto": "./src/crypto.js",
     "./merkle": "./src/merkle.js",
+    "./checkpoint": "./src/checkpoint.js",
     "./note-codec": "./src/note-codec.js",
     "./handoff": "./src/handoff.js",
     "./proof": "./src/proof.js",

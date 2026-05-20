@@ -5,12 +5,13 @@
 
 import * as snarkjs from 'snarkjs';
 
+function biToStr(v) {
+  if (Array.isArray(v)) return v.map(biToStr);
+  return v.toString();
+}
 function biToStrInputs(o) {
   const out = {};
-  for (const [k, v] of Object.entries(o)) {
-    if (Array.isArray(v)) out[k] = v.map((x) => x.toString());
-    else out[k] = v.toString();
-  }
+  for (const [k, v] of Object.entries(o)) out[k] = biToStr(v);
   return out;
 }
 
