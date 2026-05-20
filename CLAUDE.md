@@ -198,12 +198,66 @@ polkadot-api + smoldot.
   verifier export) and re-copy the `.wasm` + `_final.zkey` artifacts into
   the dapps' `public/zk/` dirs.
 
+## chopsticks-specific gotchas (learned the hard way)
+
+- **Hardhat default keys collide on a forked Paseo.** Account #0's CREATE
+  address at nonce 0 already has code on real Paseo (someone else used the
+  same key). Deploying anything from that account errors with
+  `pallet-revive::Error::DuplicateContract`. Derive deployer keys from
+  PoC-unique seeds instead — see `chopsticks/paseo-asset-hub.yml` for the
+  three `keccak256("simplex-community-credits-poc-…")` keys we use.
+
+- **`pkill -f chopsticks` does not kill chopsticks.** The process name is
+  `node /usr/local/.../chopsticks/.../cli.js`; the substring `chopsticks`
+  is in argv but pkill's pattern-match misses it under some configurations.
+  Symptom: new chopsticks instance binds to port 8001/8002 instead of 8000
+  (collision falls through to the next port), and your import-storage
+  changes silently never take effect because the old instance still serves
+  the eth-rpc bridge. Always kill by PID.
+
+- **resolc emits ELF, not PVM, when a contract has unresolved library
+  refs.** VoucherPool ships as raw ELF (magic `0x7f454c46`) because
+  PoseidonT3 isn't linked yet. `resolc --link --libraries 'path:Name=0x…'`
+  relocates the ELF against the deployed library address and rewrites it
+  in place as a PolkaVM blob (magic `0x50564d00`). Implemented in
+  `test/e2e/deploy.mjs::linkLibrariesPvm`. EVM/hardhat uses the standard
+  solc placeholder scheme (`linkLibrariesEvm`).
+
+- **Pre-compute Merkle zero-subtree hashes; don't call `PoseidonT3.hash`
+  in the constructor.** `tree.init()` doing 20 external Poseidon calls
+  blows pallet-revive's per-extrinsic ref_time budget (constructor OOG).
+  Constants are hardcoded in `IncrementalMerkleTree.sol::_zero()`.
+
+- **eth_estimateGas under-budgets pallet-revive calls.** ethers v6's
+  default estimateGas pre-flight returns gas values that pallet-revive's
+  weight conversion treats as OutOfGas. Pass `{ gasLimit: 100_000_000n }`
+  explicitly on every state-changing tx via `txOpts` / call options.
+
+- **Combined verify + transferFrom + 20-Poseidon insert still exceeds the
+  per-extrinsic weight cap on Paseo Asset Hub** (`buyAndCreate` /
+  `assign` / `redeem` all hit this). Each sub-op fits in isolation;
+  the combination doesn't. See `chopsticks/README.md` "Fixes for someone
+  continuing the work" — the cleanest path is splitting heavy ops into
+  two txs with a commit-then-finalize gate, but reducing tree depth to
+  ~12 (recompile circuits + re-do trusted setup) also works.
+
+- **eth-rpc binds to IPv6 first.** `[::1]:8545` and `localhost:8545` work;
+  `127.0.0.1:8545` may silently time out. The harness uses `localhost`.
+
+- **chopsticks output filename collisions.** `chopsticks/chopsticks.log`
+  and `chopsticks/eth-rpc.log` get appended-to forever; delete them
+  between runs to make `grep` useful.
+
+- **eth-rpc receipt sqlite gets dirty.** `~/.local/share/eth-rpc/eth-rpc.db*`
+  caches block + log records and can throw `UNIQUE constraint failed`
+  on a restart. Delete the db files when restarting chopsticks from
+  scratch.
+
 ## What's NOT done
 
-- `TARGET=chopsticks` for `test/e2e/flow.test.mjs` — `deploy.mjs` currently
-  loads from `contracts/artifacts/` (hardhat EVM bytecode). Switch to
-  `contracts/artifacts-pvm/` when `TARGET=chopsticks`. See
-  `chopsticks/README.md` for the full step list.
+- Heavy multi-op txs against chopsticks-forked Paseo (see above).
+  Hardhat-local e2e still 10/10 — the same `VoucherPool` runs the full
+  flow end-to-end with `pnpm --filter test/e2e test`.
 - Mobile-bench page (`?bench=1` in dapps), real mobile manual pass — out
   of session scope, plan §8.7.1 + §10 spell them out.
 - GitHub Pages deploy workflow (plan §11) — README mentions but no

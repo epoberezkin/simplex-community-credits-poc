@@ -151,31 +151,41 @@ async function main() {
     relay = new ethers.NonceManager(new ethers.Wallet(pks[2], provider));
     void wallets;
   } else if (target === 'chopsticks') {
-    const url = process.env.CHOPSTICKS_RPC_URL || 'http://127.0.0.1:8545';
+    // Deterministic-but-PoC-unique deployer/buyer/relay keys; the substrate-
+    // mapped versions are prefunded with PAS (+ tUSDC for the buyer) in
+    // chopsticks/paseo-asset-hub.yml. See the YAML's comment for the reason
+    // we can't use the Hardhat defaults on a forked Paseo.
+    const url = process.env.CHOPSTICKS_RPC_URL || 'http://localhost:8545';
     provider = new ethers.JsonRpcProvider(url);
-    const pk = process.env.PRIVATE_KEY;
-    if (!pk) throw new Error('TARGET=chopsticks requires PRIVATE_KEY (deployer)');
-    admin = new ethers.NonceManager(new ethers.Wallet(pk, provider));
-    const buyerWallet = ethers.Wallet.createRandom().connect(provider);
-    const relayWallet = ethers.Wallet.createRandom().connect(provider);
-    await (await admin.sendTransaction({ to: buyerWallet.address, value: ethers.parseEther('1') })).wait();
-    await (await admin.sendTransaction({ to: relayWallet.address, value: ethers.parseEther('1') })).wait();
-    buyer = new ethers.NonceManager(buyerWallet);
-    relay = new ethers.NonceManager(relayWallet);
+    const pks = [
+      '0x8f596c90dbdbe79218062ae45fafaf92e3efecbfe9695007e273e5c82d732f27', // deployer
+      '0x72a4e571c864f09fdd0ab7ea50e4bbbb060ab18c9250b5c41a4877ad81761885', // buyer
+      '0x1a7cd30490ac27d8c1fd65a942fc9bb2af050119f2140a0e8413ff70cc324822', // relay
+    ];
+    admin = new ethers.NonceManager(new ethers.Wallet(pks[0], provider));
+    buyer = new ethers.NonceManager(new ethers.Wallet(pks[1], provider));
+    relay = new ethers.NonceManager(new ethers.Wallet(pks[2], provider));
   } else {
     throw new Error(`unknown TARGET=${target}`);
   }
 
   // ------------------------------------------------------- deploy + setup ---
 
-  const { tUsdc, pool } = await deployAll({ signer: admin, epochSize: 100 });
+  // pallet-revive's eth-rpc estimateGas under-budgets contract calls that
+  // hit ecPairing precompile + storage + external calls (our Groth16 verifier
+  // + Poseidon Merkle insert burns far more PVM weight than EVM gas would
+  // suggest). Bypass eth_estimateGas by passing an explicit cap on every tx.
+  const TX_GAS = target === 'chopsticks' ? 100_000_000n : undefined;
+  const callOpts = TX_GAS ? { gasLimit: TX_GAS } : {};
+
+  const { tUsdc, pool } = await deployAll({ signer: admin, epochSize: 100, txOpts: callOpts });
   console.log('  pool   :', await pool.getAddress());
   console.log('  tUSDC  :', await tUsdc.getAddress());
 
   const buyerAddr = await buyer.getAddress();
   const relayAddr = await relay.getAddress();
-  await (await tUsdc.connect(admin).mint(buyerAddr, 1_000_000n)).wait();
-  await (await pool.connect(admin).registerOperator(relayAddr)).wait();
+  await (await tUsdc.connect(admin).mint(buyerAddr, 1_000_000n, callOpts)).wait();
+  await (await pool.connect(admin).registerOperator(relayAddr, callOpts)).wait();
 
   // Local mirror tree the chat dapp would rebuild from events.
   const mirror = new IncrementalMerkleTree();
@@ -209,11 +219,11 @@ async function main() {
     });
     const { pA, pB, pC } = unpackProof(proofFlat);
 
-    await (await tUsdc.connect(buyer).approve(await pool.getAddress(), value)).wait();
+    await (await tUsdc.connect(buyer).approve(await pool.getAddress(), value, callOpts)).wait();
     const txr = await (
       await pool
         .connect(buyer)
-        .buyAndCreate(cm, value, Number(expiryEpoch), pA, pB, pC)
+        .buyAndCreate(cm, value, Number(expiryEpoch), pA, pB, pC, callOpts)
     ).wait();
 
     const poolBal = await tUsdc.balanceOf(await pool.getAddress());
@@ -325,7 +335,7 @@ async function main() {
     const txr = await (
       await pool
         .connect(relay)
-        .assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC)
+        .assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC, callOpts)
     ).wait();
     assertOk(txr.status === 1, 'assign tx status');
 
@@ -362,7 +372,7 @@ async function main() {
       await (
         await pool
           .connect(relay)
-          .assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC)
+          .assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC, callOpts)
       ).wait();
     } catch (e) {
       threw = /pool\/nullifier/.test(e.message);
@@ -441,7 +451,7 @@ async function main() {
         .connect(relay)
         .redeem(
           b.nullifier, b.expiryEpoch, b.redeemValue, b.cmChange, b.root,
-          b.operatorId, pA, pB, pC,
+          b.operatorId, pA, pB, pC, callOpts,
         )
     ).wait();
     assertOk(txr.status === 1, 'redeem tx status');
@@ -454,7 +464,7 @@ async function main() {
 
   await step('Dapp C — operator withdraw', async () => {
     const before = await tUsdc.balanceOf(relayAddr);
-    await (await pool.connect(relay).withdraw(redeemValue)).wait();
+    await (await pool.connect(relay).withdraw(redeemValue, callOpts)).wait();
     const after = await tUsdc.balanceOf(relayAddr);
     assertEq(after - before, redeemValue, 'relay tUSDC delta');
     assertEq(await pool.credit(relayAddr), 0n, 'credit drained');
