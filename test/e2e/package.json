@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@community-credits/core": "workspace:*",
+    "@polkadot/api": "^14.0.0",
     "contracts": "workspace:*",
     "ethers": "^6.13.0",
     "hardhat": "^2.22.0",

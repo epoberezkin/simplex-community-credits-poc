@@ -17,10 +17,19 @@ cd "$ROOT"
 CHOPSTICKS_PORT="${CHOPSTICKS_PORT:-8000}"
 ETH_RPC_PORT="${ETH_RPC_PORT:-8545}"
 ETH_RPC_BIN="${ETH_RPC_BIN:-eth-rpc}"
+# CHAIN=paseo|polkadot — picks the YAML to fork. Default paseo for
+# back-compat; polkadot is what fee-measurement runs use.
+CHAIN="${CHAIN:-paseo}"
+case "${CHAIN}" in
+  paseo)    CFG="chopsticks/paseo-asset-hub.yml" ;;
+  polkadot) CFG="chopsticks/polkadot-asset-hub.yml" ;;
+  *)        echo "Unknown CHAIN=${CHAIN}; expected paseo|polkadot" >&2; exit 1 ;;
+esac
+echo "[chopsticks] using ${CFG}"
 
 echo "[chopsticks] starting on ws://127.0.0.1:${CHOPSTICKS_PORT}"
 npx @acala-network/chopsticks \
-  --config chopsticks/paseo-asset-hub.yml \
+  --config "${CFG}" \
   --port "${CHOPSTICKS_PORT}" \
   > chopsticks/chopsticks.log 2>&1 &
 CHOPSTICKS_PID=$!

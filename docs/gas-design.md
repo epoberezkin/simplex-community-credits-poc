@@ -263,9 +263,10 @@ the same way the existing PoC code does for the single step.
 
 A note is spendable from one checkpoint after its creation. The relay,
 which already sequences chat-side ops, runs an eager checkpointer
-(trigger on batch-full OR a configurable timer). Bound to a few seconds
-in practice on a low-traffic chain; one block confirmation in the
-limit.
+(trigger on batch-full OR a configurable timer). At Polkadot Asset
+Hub's 2-second block time this is ~2 s in the limit (one block);
+typically 2–6 s in practice for low-traffic chains where the timer
+fires before the batch fills.
 
 ### Who runs the checkpointer
 
@@ -439,89 +440,150 @@ Translating the weight numbers into actual DOT cost on Polkadot Asset Hub
 At DOT ≈ $4: **~$0.40 per ceiling-grazing tx**. At DOT ≈ $10: **~$1.00**.
 Comparable Ethereum mainnet 1M-gas tx at 20 gwei: ~$5–50.
 
-### Best case — after the stream+checkpoint redesign (§3b)
+### Measured — chopsticks fork of Polkadot Asset Hub (mainnet runtime)
 
-With no on-chain Poseidon, per-tx weight drops dramatically — the
-ecPairing verify dominates at ~4 K, then a handful of SSTOREs.
-Per-tx total: 65–85 K eth-rpc gas units (empirically measured to
-fit in chopsticks-forked Paseo Asset Hub).
+The above (worst-case ceiling) is a theoretical bound. To get real numbers
+we ran the full end-to-end flow (`pnpm --filter test/e2e test` with
+`TARGET=chopsticks`, `CHAIN=polkadot`) against a chopsticks fork of
+**mainnet Polkadot Asset Hub** (`pallet-revive` live since January 2026),
+instrumented to read `system.account.{free, reserved, frozen}` before
+and after each transaction. The full flow comprises 9 user-facing
+transactions. Blockspace fractions assume the Normal-dispatch budget
+of `MAX_BLOCK_WEIGHT × NORMAL_DISPATCH_RATIO / GasScale` ≈ 4,687,500
+gas per block (0.5 s ref_time × 75% / 80 K ps/gas).
 
-| Component | Plancks | DOT |
-|---|---|---|
-| Per user tx — 65–85 K eth-rpc gas units | ~6.5–8.5 × 10⁴ | ~0.000007–0.000009 DOT |
-| Length fee (~550 byte tx — proof + args) | 2.75×10⁷ | 0.003 DOT |
-| **Per user tx total** | | **≈ 0.003 DOT** |
-| | | (~$0.012–$0.030 at $4–10/DOT) |
+| # | Tx | Caller | eth-rpc gas | Inclusion fee (DOT) | Block fraction | Fits per block |
+|---|---|---|---:|---:|---:|---:|
+| 1 | `approve` (tUSDC) | buyer | 5,048 | 0.00404 | 0.108% | 928 |
+| 2 | `buyAndCreate` | buyer | 19,568 | 0.01565 | 0.418% | 239 |
+| 3 | `checkpoint` #1 | relay | 11,884 | 0.00951 | 0.254% | 394 |
+| 4 | `assign` | relay | 16,078 | 0.01286 | 0.343% | 291 |
+| 5 | `checkpoint` #2 (`cmDest`) | relay | 8,585 | 0.00687 | 0.183% | 546 |
+| 6 | `checkpoint` #3 (`cmChange`) | relay | 8,585 | 0.00687 | 0.183% | 546 |
+| 7 | `redeem` | relay | 19,716 | 0.01577 | 0.421% | 237 |
+| 8 | `checkpoint` #4 (redeem `cmChange`) | relay | 8,585 | 0.00687 | 0.183% | 546 |
+| 9 | `withdraw` | relay | 6,489 | 0.00519 | 0.138% | 722 |
+| **Total per voucher flow** | | | **104,538** | **0.0836** | **2.23%** | **44** |
 
-The **length fee dominates**. Once compute is no longer the bottleneck,
-the cost-per-tx floor is the bytes-on-chain cost of the Groth16 proof
-(~256 bytes) + ABI overhead. Aggregating multiple users into one tx
-(rollup-style) would amortize this, but for a per-user design ~0.003
-DOT/tx is the floor.
+**All-in cost per voucher** (one buy + one assign + one redeem + one
+withdraw with the surrounding BATCH=1 checkpoints): **0.0836 DOT**
+≈ **$0.109 at DOT = \$1.30** (current price). At BATCH=8 (production
+checkpointer batches four streamed leaves into one tx), per-voucher
+total drops to **~0.061 DOT ≈ \$0.079**.
 
-Per `checkpoint` (BATCH=1):
+**Throughput ceiling.** 44 complete voucher flows per **2-second**
+block (Polkadot Asset Hub adopted 2 s block time in v2.0.5, January
+2026, via elastic scaling on 3 cores) ≈ **22 vouchers/sec sustained**,
+assuming the protocol owns the entire Normal-dispatch class of the
+chain (which it doesn't — the chain serves XCM, asset transfers,
+governance, etc., so realistic share is a small fraction). The
+single-operation bottleneck is `buyAndCreate` and `redeem` at
+~240/block each ≈ **120 buys/sec or 120 redeems/sec** if either
+dominated the block. Well above plausible community-credits demand.
 
-| Component | Plancks | DOT |
-|---|---|---|
-| ref_time (~40 K gas units) | ~4×10⁴ | <0.00001 DOT |
-| Length fee (~800 bytes — proof + public inputs) | 4×10⁷ | 0.004 DOT |
-| **Per checkpoint** | | **≈ 0.004 DOT** |
+Note: the per-block weight budget (`MAX_BLOCK_WEIGHT.ref_time = 0.5 s`,
+Normal-dispatch ratio 75%) is unchanged from the 6-second-block era;
+elastic scaling delivers extra throughput by producing N blocks per
+relay-block window across N cores, each with the same weight budget.
 
-Amortized at BATCH=1: ~0.004 DOT per leaf. At BATCH=8 (production):
-~0.0005 DOT per leaf.
+### Reserved and frozen balances
 
-**Combined per voucher operation** (user tx + amortized checkpoint
-share):
+The measurement reads all three substrate balance fields:
 
-| Configuration | DOT/op | USD ($4/DOT) | USD ($10/DOT) |
-|---|---|---|---|
-| PoC (BATCH=1) | ~0.007 | $0.03 | $0.07 |
-| Production (BATCH=8) | ~0.004 | $0.02 | $0.04 |
+- `free`: the spendable portion that pays fees.
+- `reserved`: locked by `pallet_balances::Hold` (e.g. for storage
+  deposits in some pallet configurations).
+- `frozen`: locked by `pallet_balances::Freeze` (vesting, staking,
+  governance).
 
-About **25–30× cheaper** than the original OOG-or-bust ceiling-grazing
-design's 0.10 DOT, and — crucially — the protocol actually completes
-under the per-extrinsic weight ceiling rather than reverting on OOG.
+Across all 9 transactions of the flow, **`reserved` delta = 0** and
+**`frozen` delta = 0**. Empirically:
 
-### Storage deposit (separate from inclusion fee)
+- pallet-revive on Polkadot Asset Hub does *not* lock the caller's
+  balance via the `reserved` or `frozen` mechanisms. The full cost of
+  state writes is rolled into the inclusion fee (which is debited from
+  `free`).
+- The user-facing all-in cost is exactly the inclusion fee — no
+  separate up-front deposit to fund, no refund cycle to track.
+- Frozen-balance interactions (e.g. a buyer who has DOT locked in
+  vesting or governance) do not interfere with the protocol — the
+  per-tx fee comes from the unfrozen portion.
 
-Each new state slot the contract writes also locks
-`storage_deposit_factor × bytes` of the tx caller's balance, refundable
-when the slot is cleared.
+This also means our earlier "storage deposit ~0.003 DOT per cm" estimate
+based on `polkadot-fellows/runtimes` deposit constants was inapplicable
+to pallet-revive specifically. Those constants govern pallets that *do*
+use `reserved` (e.g. `pallet_assets`, `pallet_identity`); pallet-revive
+takes a different route.
 
-For our `mapping(uint32 ⇒ uint256) commitments`:
-- 32 bytes per cm × `100 MILLICENTS/byte` = **~0.0032 DOT locked per
-  streamed cm**, paid by the user submitting the tx.
-- buyAndCreate: 1 cm written = 0.0032 DOT lockup
-- assign: 2 cm written = 0.0064 DOT lockup
-- redeem: 1 cm written = 0.0032 DOT lockup
+### Empirical fee rate
 
-If `checkpoint(...)` clears `commitments[i]` after use (one-line change,
-adds SSTORE-to-zero per leaf), this lockup is **refunded within
-seconds** — net zero. If left in place (PoC behavior), it's permanent.
+Total fee / total gas: 836,304,000 plancks ÷ 104,538 gas =
+**~8,000 plancks per eth-rpc gas unit** on the live Polkadot Asset Hub
+runtime. This is the load-bearing number for cost projection of any new
+operation — multiply the operation's measured gas (or `eth_estimateGas`
+output) by 8,000 / 10¹⁰ = **8×10⁻⁷ DOT per gas unit**, then by current
+DOT/USD to get a USD fee.
 
-For a $1-denominated voucher at DOT = $4, the *temporary* lockup is
-~$0.013, recovered on next checkpoint. Acceptable; doesn't break the
-economics.
+The earlier back-of-envelope estimate (4×10⁻³ plancks per picosecond ×
+80 K ps per gas unit = 320 plancks per gas) was off by ~25×. The real
+runtime applies length fees and a different `WeightToFee` coefficient
+than what the constants suggested in isolation; the measured rate
+supersedes the estimate.
+
+### Surprises from the measurement
+
+**Checkpoint cost is ~⅓ of total flow cost.** Four BATCH=1 checkpoints
+total 0.0301 DOT (36% of the all-in). Switching to BATCH=8 would
+amortize four checkpoints into one (~0.007 DOT instead of 0.030 DOT),
+dropping per-voucher total to **~0.061 DOT** ≈ $0.079 at DOT = \$1.30
+— about 27% cheaper.
+
+**Per-voucher cost vs voucher face value.** At 0.084 DOT all-in per
+voucher (BATCH=1, \$0.109 today) or 0.061 DOT (BATCH=8, \$0.079
+today), the protocol is economically viable for vouchers ≥ ~\$1 with
+modest margin and very comfortable for vouchers ≥ \$5. Sub-\$1
+vouchers are borderline; this sets a practical lower bound on the
+denomination set $\mathcal{D}$ in the fixed-denomination design
+(Section~\ref{sec:amount-privacy}).
+
+### Worst case revisited
+
+The original worst-case estimate of 0.10 DOT (theoretical per-extrinsic
+ceiling) is still the upper bound and still ~1.2× the measured all-in
+voucher cost. The actual operations land 1–2 orders of magnitude under
+the per-tx ceiling, leaving plenty of headroom for circuit growth.
+
+### Storage deposit and frozen balances
+
+Empirically (see "Reserved and frozen balances" above), per-user txs
+on Polkadot Asset Hub mainnet runtime show **zero** delta in both
+`reserved` and `frozen` balance dimensions. pallet-revive rolls
+storage costs into the inclusion fee rather than locking them as a
+refundable deposit. User-facing cost = inclusion fee, full stop.
+
+The contract-creation deposit (one-time, when `VoucherPool` is
+deployed) is a separate matter and is paid by the deployer, not by
+per-tx callers.
 
 ### What's not included above
 
 - **`targeted_fee_adjustment`** multiplier: rises with sustained
-  congestion (default 1×, can hit 2–4× under load).
-- The `GasScale = 80,000` ratio is documented but not yet measured
-  against a real successful tx receipt on mainnet Asset Hub. Treat
-  absolute fee numbers as accurate to ±2×.
-- The contract-creation `storage_deposit` for `VoucherPool` itself
-  (~few hundred DOT locked once, refundable on destruction) is a
-  one-time setup cost separate from per-tx fees.
+  congestion (default 1×, can hit 2–4× under load). The chopsticks
+  fork inherits the current mainnet adjustment value at the forked
+  block; under load the per-tx fees scale linearly.
+- A live Polkadot Asset Hub deployment will see per-block gas-price
+  adjustments that the static fork doesn't reproduce.
 
 ### Why this matters for the protocol
 
-A community-credits voucher denominated in tUSDC at $1 face value can't
-absorb a $0.40 mint fee — the original design breaks even only on $10+
-vouchers (and that's before it OOGs entirely). The redesign brings the
-per-mint *inclusion fee* to under a cent and the *storage lockup* to a
-recoverable ~$0.01, making sub-dollar denominations economically
-viable.
+The original 20-Poseidon-per-insert design OOGs at >100 M weight units
+per tx and never lands. The stream+checkpoint redesign brings the
+measured per-voucher cost to **0.084 DOT (BATCH=1) or 0.061 DOT (BATCH=8)**
+≈ **\$0.11 or \$0.08 at DOT = \$1.30**. That makes voucher denominations
+of \$1 and up economically viable. The full voucher flow occupies just
+~2.2% of a Polkadot Asset Hub block (~44 flows/block, ~22 flows/second
+at the chain's 2-second block time) — well above plausible protocol
+demand for community credits.
 
 ## 7. Trade-offs
 

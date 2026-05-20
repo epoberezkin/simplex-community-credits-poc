@@ -32,6 +32,9 @@ import {
 import { proveCreate, proveAssign, proveRedeem, proveCheckpoint } from '@community-credits/core/proof';
 
 import { deployAll } from './deploy.mjs';
+import {
+  connectSubstrate, disconnectSubstrate, measured, feeReport,
+} from './fees.mjs';
 
 // ---------------------------------------------------------------- helpers ---
 
@@ -188,6 +191,22 @@ async function main() {
   await (await tUsdc.connect(admin).mint(buyerAddr, 1_000_000n, callOpts)).wait();
   await (await pool.connect(admin).registerOperator(relayAddr, callOpts)).wait();
 
+  // Fee measurement (chopsticks only). Connect to chopsticks's substrate WS
+  // so we can read system.account.{free, reserved} before/after each tx.
+  const measureFees = target === 'chopsticks';
+  if (measureFees) {
+    const subUrl = process.env.CHOPSTICKS_WS_URL || 'ws://127.0.0.1:8000';
+    console.log('  substrate WS:', subUrl);
+    await connectSubstrate(subUrl);
+  }
+  const wrap = measureFees
+    ? (label, payer, sendFn) => measured(label, payer, sendFn)
+    : async (_label, _payer, sendFn) => {
+        const tx = await sendFn();
+        if (tx?.wait) return tx.wait();
+        return tx;
+      };
+
   // Local mirror of the *checkpointed* tree state. Updated only after a
   // checkpoint is submitted on-chain. The chat dapp rebuilds the same
   // mirror by replaying VoucherCreated / Assigned / Redeemed events up to
@@ -208,11 +227,11 @@ async function main() {
       const { input } = await buildCheckpointInput({ mirror, cm, oldCount });
       const { proofFlat } = await proveCheckpoint(input);
       const { pA, pB, pC } = unpackProof(proofFlat);
-      await (
-        await pool.connect(relay).checkpoint(
+      await wrap(`checkpoint #${oldCount + 1}`, relayAddr, () =>
+        pool.connect(relay).checkpoint(
           input.newRoot, input.newCount, pA, pB, pC, callOpts,
-        )
-      ).wait();
+        ),
+      );
       pendingStream.shift();
     }
   }
@@ -244,12 +263,13 @@ async function main() {
     });
     const { pA, pB, pC } = unpackProof(proofFlat);
 
-    await (await tUsdc.connect(buyer).approve(await pool.getAddress(), value, callOpts)).wait();
-    const txr = await (
-      await pool
-        .connect(buyer)
-        .buyAndCreate(cm, value, Number(expiryEpoch), pA, pB, pC, callOpts)
-    ).wait();
+    const poolAddr = await pool.getAddress();
+    await wrap('approve', buyerAddr, () =>
+      tUsdc.connect(buyer).approve(poolAddr, value, callOpts),
+    );
+    const txr = await wrap('buyAndCreate', buyerAddr, () =>
+      pool.connect(buyer).buyAndCreate(cm, value, Number(expiryEpoch), pA, pB, pC, callOpts),
+    );
 
     const poolBal = await tUsdc.balanceOf(await pool.getAddress());
     assertEq(poolBal, value, 'pool balance');
@@ -365,11 +385,11 @@ async function main() {
     assertEq(parsed.kind === 'assign' ? 1n : 0n, 1n, 'kind=assign');
     const b = parsed.bundle;
     const { pA, pB, pC } = unpackProof(b.proof);
-    const txr = await (
-      await pool
-        .connect(relay)
-        .assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC, callOpts)
-    ).wait();
+    const txr = await wrap('assign', relayAddr, () =>
+      pool.connect(relay).assign(
+        b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC, callOpts,
+      ),
+    );
     assertOk(txr.status === 1, 'assign tx status');
 
     // Both new commitments land in the stream. They'll be folded into the
@@ -491,14 +511,12 @@ async function main() {
     assertEq(parsed.kind === 'redeem' ? 1n : 0n, 1n, 'kind=redeem');
     const b = parsed.bundle;
     const { pA, pB, pC } = unpackProof(b.proof);
-    const txr = await (
-      await pool
-        .connect(relay)
-        .redeem(
-          b.nullifier, b.expiryEpoch, b.redeemValue, b.cmChange, b.root,
-          b.operatorId, pA, pB, pC, callOpts,
-        )
-    ).wait();
+    const txr = await wrap('redeem', relayAddr, () =>
+      pool.connect(relay).redeem(
+        b.nullifier, b.expiryEpoch, b.redeemValue, b.cmChange, b.root,
+        b.operatorId, pA, pB, pC, callOpts,
+      ),
+    );
     assertOk(txr.status === 1, 'redeem tx status');
 
     // cmChange goes into the stream; the next drainCheckpoints() will fold
@@ -517,7 +535,9 @@ async function main() {
 
   await step('Dapp C — operator withdraw', async () => {
     const before = await tUsdc.balanceOf(relayAddr);
-    await (await pool.connect(relay).withdraw(redeemValue, callOpts)).wait();
+    await wrap('withdraw', relayAddr, () =>
+      pool.connect(relay).withdraw(redeemValue, callOpts),
+    );
     const after = await tUsdc.balanceOf(relayAddr);
     assertEq(after - before, redeemValue, 'relay tUSDC delta');
     assertEq(await pool.credit(relayAddr), 0n, 'credit drained');
@@ -546,7 +566,10 @@ async function main() {
     assertEq(dec.sk, n.sk, 'note.sk');
   });
 
+  if (measureFees) feeReport();
+
   console.log(`\n${testsRun - testsFailed}/${testsRun} steps passed`);
+  if (measureFees) await disconnectSubstrate();
   await stopHardhatNode();
   process.exit(testsFailed ? 1 : 0);
 }

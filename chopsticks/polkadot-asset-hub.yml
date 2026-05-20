@@ -1,0 +1,58 @@
+# Chopsticks fork of Polkadot Asset Hub (mainnet).
+#
+# pallet-revive went live on Polkadot Asset Hub on 27 January 2026. This
+# fork lets the e2e harness measure REAL inclusion fees and storage
+# deposits against the production runtime, rather than the back-of-envelope
+# estimates derived from polkadot-fellows/runtimes constants.
+#
+# Usage:
+#   CHAIN=polkadot ./chopsticks/run.sh
+#
+# Prefund block: three deterministic-but-PoC-unique EOAs (deployer / buyer
+# / relay) whose substrate-mapped accounts (h160 || 0xee*12) hold:
+#   - 1000 DOT free balance for gas and storage_deposit lockup
+#   - 10000 USDT (asset id 1984) for the buyer to spend
+# These accounts are very unlikely to have any on-chain history on Polkadot,
+# so the DuplicateContract trap we hit with Hardhat keys doesn't apply.
+
+endpoint:
+  - wss://polkadot-asset-hub-rpc.polkadot.io
+  - wss://asset-hub-polkadot.ibp.network
+  - wss://asset-hub-polkadot.dotters.network
+  - wss://asset-hub-polkadot-rpc.n.dwellir.com
+mock-signature-host: true
+db: ./chopsticks/polkadot-asset-hub.sqlite
+block: ${env.POLKADOT_ASSET_HUB_BLOCK_NUMBER}
+runtime-log-level: 5
+
+import-storage:
+  System:
+    Account:
+      # Alice  (handy for sudo-style admin txs)
+      - - - 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+        - providers: 1
+          data:
+            free: '10000000000000'  # 1000 DOT (10 decimals)
+      # deployer  pk 0x8f59… → EVM 0xB60659fd4F6805C957743321b3f6abc4bE1cEb41
+      - - - '0xb60659fd4f6805c957743321b3f6abc4be1ceb41eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '10000000000000'  # 1000 DOT
+      # buyer     pk 0x72a4… → EVM 0x23D9453A70370DE312825458b7E49539871025EB
+      - - - '0x23d9453a70370de312825458b7e49539871025ebeeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '10000000000000'
+      # relay     pk 0x1a7c… → EVM 0x648Ab6972643980163C0EA116A452f188512B624
+      - - - '0x648ab6972643980163c0ea116a452f188512b624eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '10000000000000'
+
+  # USDT on Polkadot Asset Hub is asset id 1984 (canonical). The contract
+  # uses an ERC20 mock (TestUSDC) deployed at e2e startup, so this prefund
+  # is decorative — kept for parity with paseo-asset-hub.yml and in case a
+  # future iteration switches to the pallet_assets ERC20 precompile.
+  Assets:
+    Account:
+      - [ [ 1984, '0x23d9453a70370de312825458b7e49539871025ebeeeeeeeeeeeeeeeeeeeeeeee' ], { balance: 10000000000 } ]
