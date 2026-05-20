@@ -236,10 +236,18 @@ polkadot-api + smoldot.
 - **Combined verify + transferFrom + 20-Poseidon insert still exceeds the
   per-extrinsic weight cap on Paseo Asset Hub** (`buyAndCreate` /
   `assign` / `redeem` all hit this). Each sub-op fits in isolation;
-  the combination doesn't. See `chopsticks/README.md` "Fixes for someone
-  continuing the work" — the cleanest path is splitting heavy ops into
-  two txs with a commit-then-finalize gate, but reducing tree depth to
-  ~12 (recompile circuits + re-do trusted setup) also works.
+  the combination doesn't. Tried cutting tree depth 20 → 12 → 8: the
+  constructor stopped OOG-ing (good), but `buyAndCreate` still OOGs at
+  depth 8. The remaining bottleneck is likely the proof_size weight
+  from the verifier+transferFrom+insert combo touching too much state
+  in one extrinsic, not ref_time from Poseidon ops. Raising the eth
+  `gas` hint to 1T doesn't help — pallet-revive caps independently.
+  For posterity: `verifyProof` alone returns TRUE in 4064 "gas units"
+  via `eth_call`; simple ERC20 `transfer` is 4615; `buyAndCreate`
+  exceeds 100M of the same unit. See `chopsticks/README.md` "Fixes for
+  someone continuing the work" — the workable path is splitting heavy
+  ops into two txs with a commit-then-finalize gate, or overriding the
+  runtime via chopsticks' `wasm-override`.
 
 - **eth-rpc binds to IPv6 first.** `[::1]:8545` and `localhost:8545` work;
   `127.0.0.1:8545` may silently time out. The harness uses `localhost`.

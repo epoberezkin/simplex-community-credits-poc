@@ -43,16 +43,17 @@ In order of effort:
    — building a permissive custom runtime takes ~half a day. Storage
    overrides via import-storage won't help here since these are constants.
 
-3. **Recompile circuits at smaller tree depth.** Cutting DEPTH from 20 to
-   ~12 reduces Merkle insert from 20 Poseidon calls to 12 (≈40% weight
-   saving) and is enough to fit. The circuit constraint count and the
-   trusted-setup ptau (we already use ptau-14 which covers ~16K) stay
-   the same shape. Workflow:
-   - edit `circuits/src/{assign,redeem}.circom` (the `Assign(20)` /
-     `Redeem(20)` instantiations), and `IncrementalMerkleTree.sol::DEPTH`
-   - re-run `circuits/scripts/{compile,setup,verifiers}.mjs`
-   - re-run `contracts/scripts/compile-resolc.mjs`
-   - copy the new wasm + zkey into `packages/{purchaser,chat}/public/zk/`
+3. ~~Recompile circuits at smaller tree depth.~~ — **tried, did not fix
+   the heavy-tx OutOfGas.** Reducing DEPTH from 20 → 12 → 8 cut the
+   Merkle-insert Poseidon-call count proportionally and made the
+   constructor breath, but `buyAndCreate` still OOGs at depth 8. The
+   remaining bottleneck is likely the `proof_size` weight from the
+   storage reads/writes the verifier + transferFrom + insert combine, not
+   ref_time from Poseidon ops. Raising the eth-rpc `gas` hint to 1T
+   doesn't help — pallet-revive caps independently. (For posterity: at
+   depth 12 `verifyProof` alone returns TRUE in 4064 "gas units" via
+   `eth_call`, simple ERC20 `transfer` is 4615; `buyAndCreate` exceeds
+   even 100M of the same unit.)
 
 ## What's wired up today
 
