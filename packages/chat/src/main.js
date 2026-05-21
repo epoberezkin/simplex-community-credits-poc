@@ -5,6 +5,11 @@
 // (Linting reminder: grep for 'eip6963' or 'BrowserProvider' in this dir
 //  should return zero matches.)
 
+// circomlibjs → blake-hash relies on Node's `Buffer` global; polyfill it
+// before any module-init code in core/poseidon runs.
+import { Buffer } from 'buffer';
+globalThis.Buffer ||= Buffer;
+
 import { ethers } from 'ethers';
 import QRCode from 'qrcode';
 import QrScanner from 'qr-scanner';
@@ -25,10 +30,13 @@ import { openStore } from '@community-credits/core/store';
 const cfg = await fetch('./config.json').then((r) => r.json());
 
 const POOL_ABI = [
-  'event VoucherCreated(uint256 indexed cm, uint256 value, uint32 expiryEpoch, uint32 leafIndex)',
-  'event Assigned(uint256 indexed nullifier, uint32 indexed expiryEpoch, uint256 cmDest, uint256 cmChange, uint32 destLeafIndex, uint32 changeLeafIndex)',
-  'event Redeemed(uint256 indexed nullifier, uint32 indexed expiryEpoch, address indexed operator, uint256 redeemValue, uint256 cmChange, uint32 changeLeafIndex)',
-  'function nextLeafIndex() view returns (uint32)',
+  // canonical (position, cm) mapping for every appended leaf
+  'event StreamAppended(uint32 indexed position, uint256 cm)',
+  // stream + checkpoint views
+  'function streamCount() view returns (uint32)',
+  'function streamAt(uint32 position) view returns (uint256)',
+  'function checkpointedRoot() view returns (uint256)',
+  'function checkpointedCount() view returns (uint32)',
 ];
 
 const store = await openStore();
@@ -38,30 +46,44 @@ const pool =
     ? new ethers.Contract(cfg.poolAddress, POOL_ABI, provider)
     : null;
 
-// Maintain a local mirror of the on-chain tree by replaying events.
+// Off-chain mirror of the *checkpointed* Merkle tree. Membership proofs
+// for assign/redeem must verify against `checkpointedRoot`, so the mirror
+// must include exactly the leaves the contract has rolled into the tree
+// (positions [0..checkpointedCount)). Leaves in the stream beyond that
+// are pending — their notes are "not yet spendable" until a checkpointer
+// rolls them in.
 const mirror = new IncrementalMerkleTree();
-const leafByCommitment = new Map();
+let mirroredCount = 0;            // # of leaves currently in `mirror`
+const cmToLeafIndex = new Map();  // commitment(decimal string) → uint32
 
 async function rebuildMirror() {
   if (!pool) return;
-  const fromBlock = 0;
-  const toBlock = await provider.getBlockNumber();
-  const events = await pool.queryFilter('*', fromBlock, toBlock);
-  for (const ev of events) {
-    if (ev.fragment.name === 'VoucherCreated') {
-      const cm = ev.args.cm;
-      leafByCommitment.set(cm.toString(), Number(ev.args.leafIndex));
-      await mirror.insert(cm);
-    } else if (ev.fragment.name === 'Assigned') {
-      leafByCommitment.set(ev.args.cmDest.toString(), Number(ev.args.destLeafIndex));
-      leafByCommitment.set(ev.args.cmChange.toString(), Number(ev.args.changeLeafIndex));
-      await mirror.insert(ev.args.cmDest);
-      await mirror.insert(ev.args.cmChange);
-    } else if (ev.fragment.name === 'Redeemed') {
-      leafByCommitment.set(ev.args.cmChange.toString(), Number(ev.args.changeLeafIndex));
-      await mirror.insert(ev.args.cmChange);
-    }
+  // Refresh cm→leafIndex map from StreamAppended events. Cheap: each event
+  // has a tiny payload and queryFilter only re-scans new blocks per the
+  // provider's log cache; for a local chopsticks fork this is instant.
+  const evs = await pool.queryFilter('StreamAppended', 0, 'latest');
+  for (const ev of evs) {
+    cmToLeafIndex.set(ev.args.cm.toString(), Number(ev.args.position));
   }
+  const checkpointed = Number(await pool.checkpointedCount());
+  for (let i = mirroredCount; i < checkpointed; i++) {
+    const cm = await pool.streamAt(i);
+    await mirror.insert(BigInt(cm));
+  }
+  mirroredCount = checkpointed;
+}
+
+function leafIndexOf(note) {
+  const idx = cmToLeafIndex.get(note.commitment);
+  if (idx === undefined) {
+    throw new Error('commitment not yet observed on-chain — refresh after the buy/assign tx confirms');
+  }
+  return idx;
+}
+
+async function isCheckpointed(leafIndex) {
+  if (!pool) return false;
+  return leafIndex < Number(await pool.checkpointedCount());
 }
 
 // ---- UI plumbing ----
@@ -142,13 +164,23 @@ async function renderUserNotes() {
     host.innerHTML = '<p class="mut">No vouchers yet. Open an <code>?import=…</code> link from the purchaser dapp.</p>';
     return;
   }
+  // Pull checkpoint state once so the list reflects spendability.
+  await rebuildMirror().catch(() => {});
+  const cpCount = pool ? Number(await pool.checkpointedCount().catch(() => 0n)) : 0;
   for (const n of notes) {
     const row = document.createElement('div');
     row.className = 'note-row';
-    const status = n.spent ? '✓ spent' : `${n.value} tUSDC`;
+    const leafIdx = cmToLeafIndex.get(n.commitment);
+    const pending =
+      !n.spent && (leafIdx === undefined || leafIdx >= cpCount);
+    const status = n.spent
+      ? '✓ spent'
+      : pending
+        ? `${n.value} tUSDC (⏳ pending checkpoint)`
+        : `${n.value} tUSDC`;
     row.innerHTML = `<span>cm ${n.commitment.slice(0, 10)}…</span><span>${status}</span>`;
     host.appendChild(row);
-    if (!n.spent) {
+    if (!n.spent && !pending) {
       const opt = document.createElement('option');
       opt.value = n.commitment;
       opt.textContent = `${n.value} (cm ${n.commitment.slice(0, 8)}…)`;
@@ -180,13 +212,22 @@ async function renderAdminNotes() {
     return;
   }
   const notes = await store.list(`community-${cid}`);
+  await rebuildMirror().catch(() => {});
+  const cpCount = pool ? Number(await pool.checkpointedCount().catch(() => 0n)) : 0;
   for (const n of notes) {
     const row = document.createElement('div');
     row.className = 'note-row';
-    const status = n.spent ? '✓ spent' : `${n.value} (#${cid})`;
+    const leafIdx = cmToLeafIndex.get(n.commitment);
+    const pending =
+      !n.spent && (leafIdx === undefined || leafIdx >= cpCount);
+    const status = n.spent
+      ? '✓ spent'
+      : pending
+        ? `${n.value} (#${cid}) ⏳ pending`
+        : `${n.value} (#${cid})`;
     row.innerHTML = `<span>cm ${n.commitment.slice(0, 10)}…</span><span>${status}</span>`;
     host.appendChild(row);
-    if (!n.spent) {
+    if (!n.spent && !pending) {
       const opt = document.createElement('option');
       opt.value = `${cid}:${n.commitment}`;
       opt.textContent = `${n.value}`;
@@ -240,8 +281,14 @@ async function doAssign() {
 
   try {
     await rebuildMirror();
-    const leafIndex = leafByCommitment.get(note.commitment);
-    if (leafIndex === undefined) throw new Error(`commitment not on-chain; replay events`);
+    const leafIndex = leafIndexOf(note);
+    if (!(await isCheckpointed(leafIndex))) {
+      throw new Error(
+        `note not yet checkpointed (leafIndex=${leafIndex}, ` +
+          `checkpointedCount=${await pool.checkpointedCount()}); ` +
+          `wait for the next checkpoint and retry`,
+      );
+    }
     const { pathElements, pathIndices, root } = await mirror.proof(leafIndex);
     const sk = BigInt(note.sk);
     const value = BigInt(note.value);
@@ -306,8 +353,14 @@ async function doRedeem() {
 
   try {
     await rebuildMirror();
-    const leafIndex = leafByCommitment.get(note.commitment);
-    if (leafIndex === undefined) throw new Error('commitment not on-chain');
+    const leafIndex = leafIndexOf(note);
+    if (!(await isCheckpointed(leafIndex))) {
+      throw new Error(
+        `note not yet checkpointed (leafIndex=${leafIndex}, ` +
+          `checkpointedCount=${await pool.checkpointedCount()}); ` +
+          `wait for the next checkpoint and retry`,
+      );
+    }
     const { pathElements, pathIndices, root } = await mirror.proof(leafIndex);
     const sk = BigInt(note.sk);
     const value = BigInt(note.value);

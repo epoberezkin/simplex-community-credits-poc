@@ -2,6 +2,10 @@
 // The dapp posts { kind: 'assign'|'redeem', input }. Worker replies
 // { ok, proofFlat, publicSignals } or { err }.
 
+// circomlibjs (transitively pulled by proof-browser) needs Node's `Buffer`.
+import { Buffer } from 'buffer';
+globalThis.Buffer ||= Buffer;
+
 import { proveAssignBrowser, proveRedeemBrowser } from '@community-credits/core/proof-browser';
 
 self.onmessage = async (ev) => {

@@ -11,6 +11,7 @@
   "dependencies": {
     "@community-credits/core": "workspace:*",
     "@msgpack/msgpack": "^3.0.0",
+    "buffer": "^6.0.3",
     "ethers": "^6.13.0",
     "idb-keyval": "^6.2.1",
     "qrcode": "^1.5.4",

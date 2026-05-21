@@ -4,6 +4,11 @@
 //   3) submit each via pool.assign / pool.redeem
 //   4) credit balance + withdraw
 
+// circomlibjs → blake-hash relies on Node's `Buffer` global; polyfill it
+// before any module-init code in core/poseidon runs.
+import { Buffer } from 'buffer';
+globalThis.Buffer ||= Buffer;
+
 import { ethers } from 'ethers';
 import QrScanner from 'qr-scanner';
 import {

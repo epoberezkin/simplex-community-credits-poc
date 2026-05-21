@@ -1,0 +1,16 @@
+{
+  "name": "tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "node deploy.mjs",
+    "checkpoint": "node checkpoint.mjs"
+  },
+  "dependencies": {
+    "@community-credits/core": "workspace:*",
+    "contracts": "workspace:*",
+    "e2e": "workspace:*",
+    "ethers": "^6.13.0"
+  }
+}

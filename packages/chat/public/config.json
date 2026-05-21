@@ -1,7 +1,9 @@
 {
-  "ethRpcUrl": "http://127.0.0.1:8545",
-  "chainIdHex": "0x7a69",
+  "ethRpcUrl": "http://localhost:8545",
+  "chainIdHex": "0x190f1b43",
   "chatBaseUrl": "http://localhost:5174/",
   "relayBaseUrl": "http://localhost:5175/",
-  "poolAddress": "0x0000000000000000000000000000000000000000"
+  "poolAddress": "0x03f9324A937584F59aa70AD7fa1f41605C47883c",
+  "chainName": "Polkadot Asset Hub (chopsticks fork)",
+  "stablecoinAddress": "0x4ED6824eD0a89aC01E356Cc6919ac8DAF8754804"
 }

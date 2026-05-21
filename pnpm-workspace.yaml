@@ -3,3 +3,4 @@ packages:
   - 'contracts'
   - 'circuits'
   - 'test/e2e'
+  - 'tools'

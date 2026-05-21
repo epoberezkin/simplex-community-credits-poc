@@ -3,6 +3,11 @@
 //   2) buy form → prove `create` → approve + buyAndCreate
 //   3) emit ?import=<note> link + QR pointing at chat dapp
 
+// circomlibjs → blake-hash relies on Node's `Buffer` global; polyfill it
+// before any module-init code in core/poseidon runs.
+import { Buffer } from 'buffer';
+globalThis.Buffer ||= Buffer;
+
 import { ethers } from 'ethers';
 import QRCode from 'qrcode';
 import {

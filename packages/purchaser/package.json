@@ -11,6 +11,7 @@
   "dependencies": {
     "@community-credits/core": "workspace:*",
     "@msgpack/msgpack": "^3.0.0",
+    "buffer": "^6.0.3",
     "ethers": "^6.13.0",
     "qrcode": "^1.5.4",
     "snarkjs": "^0.7.5"
