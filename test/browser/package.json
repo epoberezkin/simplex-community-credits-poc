@@ -1,0 +1,16 @@
+{
+  "name": "@community-credits/browser-test",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "install-browsers": "playwright install --with-deps chromium"
+  },
+  "dependencies": {
+    "@community-credits/core": "workspace:*",
+    "@playwright/test": "^1.50.0",
+    "ethers": "^6.13.0"
+  }
+}

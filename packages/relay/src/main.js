@@ -4,10 +4,9 @@
 //   3) submit each via pool.assign / pool.redeem
 //   4) credit balance + withdraw
 
-// circomlibjs → blake-hash relies on Node's `Buffer` global; polyfill it
-// before any module-init code in core/poseidon runs.
-import { Buffer } from 'buffer';
-globalThis.Buffer ||= Buffer;
+// MUST be first — see ./buffer-polyfill.js. Inline polyfill won't work
+// because ES module imports are hoisted.
+import './buffer-polyfill.js';
 
 import { ethers } from 'ethers';
 import QrScanner from 'qr-scanner';
@@ -33,6 +32,30 @@ let signer;
 let userAddr;
 let pool;
 const queue = [];
+
+// Demo / Playwright path: ?demoKey=<0x-prefixed-privkey> skips EIP-6963
+// and uses a local ethers.Wallet against cfg.ethRpcUrl.
+function demoKeyFromUrl() {
+  const u = new URL(location.href);
+  const k = u.searchParams.get('demoKey');
+  return k && /^0x[0-9a-fA-F]{64}$/.test(k) ? k : null;
+}
+
+async function bootDemoMode(key) {
+  const provider = new ethers.JsonRpcProvider(cfg.ethRpcUrl);
+  signer = new ethers.NonceManager(new ethers.Wallet(key, provider));
+  userAddr = await signer.getAddress();
+  pool = new ethers.Contract(cfg.poolAddress, POOL_ABI, signer);
+  $('wallets').innerHTML =
+    '<p class="err" style="background:#fee;padding:0.4rem;border-radius:4px">' +
+    '⚠ Demo mode — using URL-supplied key. Do NOT use on a real chain.</p>';
+  $('walletStatus').textContent = `demo • ${userAddr}`;
+  $('walletStatus').className = 'ok';
+  $('queue').hidden = false;
+  $('credit').hidden = false;
+  await refreshCredit();
+  await checkInboundUrl();
+}
 
 async function renderWallets() {
   const list = await discoverProviders();
@@ -194,4 +217,6 @@ async function checkInboundUrl() {
   }
 }
 
-renderWallets();
+const _demoKey = demoKeyFromUrl();
+if (_demoKey) await bootDemoMode(_demoKey);
+else renderWallets();

@@ -62,6 +62,7 @@ echo "[eth-rpc] starting on http://127.0.0.1:${ETH_RPC_PORT}"
 "${ETH_RPC_BIN}" \
   --node-rpc-url "ws://127.0.0.1:${CHOPSTICKS_PORT}" \
   --rpc-port "${ETH_RPC_PORT}" \
+  --rpc-cors all \
   > chopsticks/eth-rpc.log 2>&1 &
 ETH_RPC_PID=$!
 trap "kill ${CHOPSTICKS_PID} ${ETH_RPC_PID} 2>/dev/null || true" EXIT

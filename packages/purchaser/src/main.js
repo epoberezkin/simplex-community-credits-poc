@@ -3,10 +3,10 @@
 //   2) buy form → prove `create` → approve + buyAndCreate
 //   3) emit ?import=<note> link + QR pointing at chat dapp
 
-// circomlibjs → blake-hash relies on Node's `Buffer` global; polyfill it
-// before any module-init code in core/poseidon runs.
-import { Buffer } from 'buffer';
-globalThis.Buffer ||= Buffer;
+// MUST be first — see ./buffer-polyfill.js. (Inline `import { Buffer } from
+// 'buffer'; globalThis.Buffer = Buffer` here does NOT work: ES module
+// imports are hoisted, so circomlibjs would init before the polyfill ran.)
+import './buffer-polyfill.js';
 
 import { ethers } from 'ethers';
 import QRCode from 'qrcode';
@@ -30,10 +30,31 @@ const ERC20_ABI = [
   'function balanceOf(address) view returns (uint256)',
 ];
 
-let signer; // ethers BrowserProvider signer
+let signer; // ethers signer (BrowserProvider-bound, or local Wallet in demo mode)
 let userAddr;
 
 const $ = (id) => document.getElementById(id);
+
+// Demo / Playwright path: ?demoKey=<0x-prefixed-privkey> skips EIP-6963
+// and uses a local ethers.Wallet against cfg.ethRpcUrl. Never use on a
+// real chain — the key is visible in the URL bar.
+function demoKeyFromUrl() {
+  const u = new URL(location.href);
+  const k = u.searchParams.get('demoKey');
+  return k && /^0x[0-9a-fA-F]{64}$/.test(k) ? k : null;
+}
+
+async function bootDemoMode(key) {
+  const provider = new ethers.JsonRpcProvider(cfg.ethRpcUrl);
+  signer = new ethers.NonceManager(new ethers.Wallet(key, provider));
+  userAddr = await signer.getAddress();
+  $('wallets').innerHTML =
+    '<p class="err" style="background:#fee;padding:0.4rem;border-radius:4px">' +
+    '⚠ Demo mode — using URL-supplied key. Do NOT use on a real chain.</p>';
+  $('walletStatus').textContent = `demo • ${userAddr}`;
+  $('walletStatus').className = 'ok';
+  $('buy').hidden = false;
+}
 
 async function renderWallets() {
   const list = await discoverProviders();
@@ -124,4 +145,6 @@ async function showResult(note) {
 }
 
 $('goBuy').addEventListener('click', buy);
-renderWallets();
+const _demoKey = demoKeyFromUrl();
+if (_demoKey) await bootDemoMode(_demoKey);
+else renderWallets();

@@ -5,10 +5,9 @@
 // (Linting reminder: grep for 'eip6963' or 'BrowserProvider' in this dir
 //  should return zero matches.)
 
-// circomlibjs → blake-hash relies on Node's `Buffer` global; polyfill it
-// before any module-init code in core/poseidon runs.
-import { Buffer } from 'buffer';
-globalThis.Buffer ||= Buffer;
+// MUST be first — see ./buffer-polyfill.js. Inline polyfill won't work
+// because ES module imports are hoisted.
+import './buffer-polyfill.js';
 
 import { ethers } from 'ethers';
 import QRCode from 'qrcode';
@@ -55,22 +54,34 @@ const pool =
 const mirror = new IncrementalMerkleTree();
 let mirroredCount = 0;            // # of leaves currently in `mirror`
 const cmToLeafIndex = new Map();  // commitment(decimal string) → uint32
+let rebuildInFlight = null;       // serialize concurrent callers
 
 async function rebuildMirror() {
   if (!pool) return;
-  // Refresh cm→leafIndex map from StreamAppended events. Cheap: each event
-  // has a tiny payload and queryFilter only re-scans new blocks per the
-  // provider's log cache; for a local chopsticks fork this is instant.
-  const evs = await pool.queryFilter('StreamAppended', 0, 'latest');
-  for (const ev of evs) {
-    cmToLeafIndex.set(ev.args.cm.toString(), Number(ev.args.position));
+  // Two render paths can call rebuildMirror concurrently; if both observe
+  // the same `mirroredCount` they'll both insert the new leaves and the
+  // mirror ends up with duplicates. Serialize on a shared promise so a
+  // second caller waits for the first to finish (and sees its updated
+  // mirroredCount).
+  if (rebuildInFlight) return rebuildInFlight;
+  rebuildInFlight = (async () => {
+    // Refresh cm→leafIndex map from StreamAppended events.
+    const evs = await pool.queryFilter('StreamAppended', 0, 'latest');
+    for (const ev of evs) {
+      cmToLeafIndex.set(ev.args.cm.toString(), Number(ev.args.position));
+    }
+    const checkpointed = Number(await pool.checkpointedCount());
+    for (let i = mirroredCount; i < checkpointed; i++) {
+      const cm = await pool.streamAt(i);
+      await mirror.insert(BigInt(cm));
+    }
+    mirroredCount = checkpointed;
+  })();
+  try {
+    await rebuildInFlight;
+  } finally {
+    rebuildInFlight = null;
   }
-  const checkpointed = Number(await pool.checkpointedCount());
-  for (let i = mirroredCount; i < checkpointed; i++) {
-    const cm = await pool.streamAt(i);
-    await mirror.insert(BigInt(cm));
-  }
-  mirroredCount = checkpointed;
 }
 
 function leafIndexOf(note) {
@@ -332,7 +343,7 @@ async function doAssign() {
       value: destValue, expiryEpoch, ownerPkHash: destOwnerPkHash,
       randomness: destRandomness, assigned: 1, redeemerHash,
     }, communityId);
-    console.log('community-import link:', cimport);
+    $('communityImportLink').href = cimport;
   } catch (e) {
     status.innerHTML = `<span class="err">${e.message}</span>`;
   }
@@ -421,7 +432,9 @@ $('scanBtn').onclick = async () => {
 await captureCommunity();
 await handleIncomingDeepLink();
 await rebuildMirror().catch((e) => console.warn('event replay skipped:', e.message));
-setMode('user');
+// Respect whatever mode handleIncomingDeepLink picked (community-import
+// URLs flip to 'admin'); default is 'user' for a fresh visit.
+setMode(mode);
 
 // Auto-generate a user owner key on first load.
 if (!(await store.getKey('user'))) {
