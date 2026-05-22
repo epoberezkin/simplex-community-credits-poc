@@ -3,8 +3,11 @@
 // which emits PVM (PolkaVM) bytecode that pallet_revive executes natively.
 // Standard EVM bytecode from solc/hardhat is rejected by the chain.
 //
-// Pass sources to resolc via standard-JSON with file URLs (not inline content)
-// so stdin stays small and doesn't deadlock on large inputs.
+// Sources are passed inline as `content:` (not `urls:`). Recent resolc
+// builds (1.x) reject the `urls:` form even with --allow-paths, complaining
+// "missing field `content`" while parsing the standard-JSON input.
+// stdin can get large (~hundreds of KB) so we route it through a tmpfile
+// to avoid pipe-buffer deadlock.
 //
 // Output: artifacts-pvm/<ContractName>.json   { abi, bytecode, linkReferences }
 
@@ -34,10 +37,11 @@ function walk(dir) {
 
 const sources = {};
 for (const f of walk(CONTRACTS)) {
-  sources[relative(ROOT, f)] = { urls: [f] };
+  sources[relative(ROOT, f)] = { content: readFileSync(f, 'utf8') };
 }
-// External imports come via inline content — solc's allow-paths rules block
-// node_modules even when listed.
+// Bare imports (`import "poseidon-solidity/PoseidonT3.sol"`) resolve
+// against the sources map by key, so just register the file under its
+// import path with inlined content.
 const externalImports = ['poseidon-solidity/PoseidonT3.sol'];
 for (const imp of externalImports) {
   sources[imp] = { content: readFileSync(resolve(NODE_MODULES, imp), 'utf8') };
@@ -72,7 +76,7 @@ const outFd = openSync(outFile, 'w');
 try {
   execFileSync(
     'resolc',
-    ['--standard-json', '--allow-paths', `${CONTRACTS},${NODE_MODULES}`],
+    ['--standard-json'],
     { stdio: [inFd, outFd, 'inherit'] },
   );
 } finally {

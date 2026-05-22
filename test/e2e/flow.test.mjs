@@ -53,7 +53,15 @@ function unpackProof(flat) {
 
 let testsRun = 0;
 let testsFailed = 0;
-async function step(name, fn) {
+let abortReason = null;            // set by a failing step → subsequent non-pure steps SKIP
+// Call as either step(name, fn) or step(name, { pure: true }, fn).
+async function step(name, optsOrFn, maybeFn) {
+  const fn   = typeof optsOrFn === 'function' ? optsOrFn : maybeFn;
+  const opts = typeof optsOrFn === 'function' ? {}       : optsOrFn;
+  if (abortReason && !opts.pure) {
+    console.log(`• ${name} … SKIP (${abortReason})`);
+    return;
+  }
   process.stdout.write(`• ${name} … `);
   const t0 = Date.now();
   try {
@@ -65,6 +73,7 @@ async function step(name, fn) {
     if (process.env.VERBOSE) console.error(e.stack);
     testsRun++;
     testsFailed++;
+    if (e.abortRest) abortReason = e.abortReason || 'previous step failed';
   }
 }
 
@@ -179,6 +188,27 @@ async function main() {
     // chopsticks/paseo-asset-hub.yml. See the YAML's comment for the reason
     // we can't use the Hardhat defaults on a forked Paseo.
     const url = process.env.CHOPSTICKS_RPC_URL || 'http://localhost:8545';
+    // Probe the bridge with a quick eth_chainId before handing it to
+    // ethers — otherwise a dead/half-dead eth-rpc surfaces as a generic
+    // "socket hang up" inside the JsonRpcProvider retry loop.
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_chainId', params: [], id: 1 }),
+        signal: AbortSignal.timeout(3000),
+      });
+      const j = await res.json();
+      if (!j?.result) throw new Error(`bad eth_chainId response: ${JSON.stringify(j)}`);
+    } catch (e) {
+      throw new Error(
+        `eth-rpc at ${url} is not responding (${e.message}).\n` +
+          `  1) Confirm chopsticks + eth-rpc are running:  bash chopsticks/run.sh\n` +
+          `  2) If eth-rpc was started against a different chopsticks before,\n` +
+          `     wipe its sqlite db:  rm -f ~/.local/share/eth-rpc/eth-rpc.db*\n` +
+          `     then restart chopsticks.`,
+      );
+    }
     provider = new ethers.JsonRpcProvider(url);
     const pks = [
       '0x8f596c90dbdbe79218062ae45fafaf92e3efecbfe9695007e273e5c82d732f27', // deployer
@@ -286,9 +316,18 @@ async function main() {
     await wrap('approve', buyerAddr, () =>
       tUsdc.connect(buyer).approve(poolAddr, value, callOpts),
     );
-    const txr = await wrap('buyAndCreate', buyerAddr, () =>
-      pool.connect(buyer).buyAndCreate(cm, value, Number(expiryEpoch), pA, pB, pC, callOpts),
-    );
+    let txr;
+    try {
+      txr = await wrap('buyAndCreate', buyerAddr, () =>
+        pool.connect(buyer).buyAndCreate(cm, value, Number(expiryEpoch), pA, pB, pC, callOpts),
+      );
+    } catch (e) {
+      // First on-chain tx — every subsequent step depends on it. Bail
+      // out with a tag so the cascade of follow-on errors gets suppressed.
+      e.abortRest = true;
+      e.abortReason = 'buyAndCreate failed — subsequent steps depend on it';
+      throw e;
+    }
 
     const poolBal = await tUsdc.balanceOf(await pool.getAddress());
     assertEq(poolBal, value, 'pool balance');
@@ -573,7 +612,7 @@ async function main() {
     assertEq(unspent + credits, deposited - withdrawn, 'solvency');
   });
 
-  await step('codec round-trip is byte-exact', async () => {
+  await step('codec round-trip is byte-exact', { pure: true }, async () => {
     const n = {
       value: 5n, expiryEpoch: 10, ownerPkHash: 0xabcn, randomness: 0xdefn,
       assigned: 1, redeemerHash: 0x123n, sk: 0x42n,

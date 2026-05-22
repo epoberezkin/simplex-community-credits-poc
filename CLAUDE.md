@@ -62,10 +62,12 @@ mode; it has to go in the settings block. The CLI flag exists for the
   and output pipes fill up. Always write input to a tmpfile and pass file
   descriptors: `stdio: [inFd, outFd, 'inherit']`. Symptom: resolc shows 0%
   CPU and ~0 RSS, looks hung.
-- `--allow-paths` rejects node_modules entries even when listed
-  ("Cannot import url … File outside of allowed directories"). Workaround:
-  inline external imports as `content:` in standard-JSON sources rather
-  than `urls:`. See `compile-resolc.mjs` for the pattern.
+- resolc 1.x rejects `urls:` in standard-JSON sources entirely with
+  `missing field 'content' at line 1 column N`, regardless of
+  `--allow-paths`. Inline every source as `content:` and drop
+  `--allow-paths`; bare imports (e.g. `poseidon-solidity/PoseidonT3.sol`)
+  still resolve as long as the import path is a key in the sources map.
+  See `compile-resolc.mjs` for the pattern.
 - IVerifiers.sol has only interfaces → no bytecode artifact → 8 sources
   produces 7 artifact files. Not a bug.
 
@@ -233,21 +235,33 @@ polkadot-api + smoldot.
   weight conversion treats as OutOfGas. Pass `{ gasLimit: 100_000_000n }`
   explicitly on every state-changing tx via `txOpts` / call options.
 
-- **Combined verify + transferFrom + 20-Poseidon insert still exceeds the
-  per-extrinsic weight cap on Paseo Asset Hub** (`buyAndCreate` /
-  `assign` / `redeem` all hit this). Each sub-op fits in isolation;
-  the combination doesn't. Tried cutting tree depth 20 → 12 → 8: the
-  constructor stopped OOG-ing (good), but `buyAndCreate` still OOGs at
-  depth 8. The remaining bottleneck is likely the proof_size weight
-  from the verifier+transferFrom+insert combo touching too much state
-  in one extrinsic, not ref_time from Poseidon ops. Raising the eth
-  `gas` hint to 1T doesn't help — pallet-revive caps independently.
-  For posterity: `verifyProof` alone returns TRUE in 4064 "gas units"
-  via `eth_call`; simple ERC20 `transfer` is 4615; `buyAndCreate`
-  exceeds 100M of the same unit. See `chopsticks/README.md` "Fixes for
-  someone continuing the work" — the workable path is splitting heavy
-  ops into two txs with a commit-then-finalize gate, or overriding the
-  runtime via chopsticks' `wasm-override`.
+- **Per-extrinsic weight cap on heavy multi-op txs — FIXED by stream +
+  checkpoint.** Historical issue: combined verify + transferFrom +
+  20-Poseidon insert in one extrinsic blew pallet-revive's per-extrinsic
+  ref_time. Resolution: the protocol now appends commitments to a stream
+  (`state.appendStream(cm)` is just an SSTORE) and the 20-Poseidon
+  Merkle insert is moved into a separate, permissionless `checkpoint()`
+  tx that proves the insert with a SNARK. `buyAndCreate` / `assign` /
+  `redeem` are now ecPairing verify + transferFrom + a couple of SSTOREs
+  — well under the cap. Measured: each fits in ~4 k pallet-revive gas
+  units (see docs/gas-design.md §"Per-op weight"). Tested green on
+  chopsticks-forked Polkadot Asset Hub.
+
+- **Stale PVM artifacts silently break the chopsticks e2e.**
+  `test/e2e/deploy.mjs` loads from `contracts/artifacts-pvm/` when
+  `TARGET=chopsticks` (pallet-revive needs PolkaVM bytecode, not EVM).
+  Those blobs are produced by `node contracts/scripts/compile-resolc.mjs`
+  — a step that is NOT wired into `pnpm --filter contracts run build`.
+  Consequence: after a fresh `pnpm --filter circuits run build` the
+  trusted setup changes → new verifier .sol constants → new hardhat
+  artifacts, but the PVM artifacts still contain the previous
+  ceremony's verifier. The deployed verifier rejects every new proof
+  and `buyAndCreate` reverts with `pool/proof`. pallet-revive surfaces
+  this as `CALL_EXCEPTION`, status=0, gasUsed ≈ 4 k (the revert is
+  before any real work, so the gas counter looks like a no-op).
+  `test/e2e/deploy.mjs::assertPvmArtifactsFresh()` now compares the
+  verifier .sol mtimes against the PVM .json mtimes and errors with a
+  clear hint pointing at `compile-resolc.mjs`.
 
 - **eth-rpc binds to IPv6 first.** `[::1]:8545` and `localhost:8545` work;
   `127.0.0.1:8545` may silently time out. The harness uses `localhost`.
@@ -263,9 +277,10 @@ polkadot-api + smoldot.
 
 ## What's NOT done
 
-- Heavy multi-op txs against chopsticks-forked Paseo (see above).
-  Hardhat-local e2e still 10/10 — the same `VoucherPool` runs the full
-  flow end-to-end with `pnpm --filter test/e2e test`.
+- Auto-rebuild of PVM artifacts on circuits change. `compile-resolc.mjs`
+  remains a manual step (deploy.mjs gates with a clear error). If we
+  want a one-command flow, wire it into a `pnpm build:pvm` script or
+  into `test:chopsticks` itself (~16 s overhead).
 - Mobile-bench page (`?bench=1` in dapps), real mobile manual pass — out
   of session scope, plan §8.7.1 + §10 spell them out.
 - GitHub Pages deploy workflow (plan §11) — README mentions but no

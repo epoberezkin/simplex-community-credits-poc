@@ -141,40 +141,60 @@ withdraw, and the relay's tUSDC balance increases by the redeemed amount.
 
 ## Chopsticks e2e tests
 
-Run the same Node e2e against a chopsticks fork of Polkadot Asset Hub
+Run the same protocol e2e against a chopsticks fork of Polkadot Asset Hub
 (or Paseo) to measure realistic gas, fees, and storage deposits against
-the production pallet-revive runtime:
+the production pallet-revive runtime. The harness here is **headless and
+non-interactive** — it drives the contracts via `@community-credits/core`
+directly (same code paths the three dapps use), but never spins up a
+browser. For the UI-driven variant see "Playwright UI variant" below.
 
 ```bash
+# one-time / after every circuits-or-contracts rebuild: compile PVM bytecode
+node contracts/scripts/compile-resolc.mjs                   # ~16s; needed for pallet-revive
+
 # in one terminal:
 CHAIN=polkadot bash chopsticks/run.sh                       # boots chopsticks + eth-rpc
 
 # in another, once chopsticks is up:
 pnpm --filter e2e run test:chopsticks                       # full flow + fee report
+
+# now, be patient, it will take a while.....
 ```
+
+> **Why the PVM compile step?** Pallet-revive deploys PolkaVM bytecode,
+> not EVM. `pnpm --filter contracts run build` produces only EVM artifacts
+> (for hardhat); `compile-resolc.mjs` regenerates the matching PVM blobs
+> in `contracts/artifacts-pvm/`. If you skip this after a circuits
+> ceremony, the deployed verifier is from the previous build and rejects
+> every new proof — `buyAndCreate` reverts with `pool/proof`. The e2e
+> harness detects the mismatch via an mtime check and errors with a hint.
 
 The harness ends with three blocks of output — per-tx fee detail, a
 by-subject roll-up, and a gas-by-action roll-up:
 
 ```
 ── Fee summary (chopsticks fork of Polkadot Asset Hub) ──
-  TOTAL inclusion fees: 1.2e-3 DOT
-  TOTAL storage locked: 8.3e-2 DOT
-  All-in:               8.4e-2 DOT
-  All-in @ DOT=$1.30:   $0.1095
-  Blockspace:           gas=1925043  block-fraction=41.07%  full-flows/block=2
+  TOTAL inclusion fees: 9.393e-2 DOT (939260000 plancks)
+  TOTAL storage locked:        0 DOT (0 plancks)
+  TOTAL frozen delta:          0 DOT (0 plancks)
+  All-in:               9.393e-2 DOT (939260000 plancks)
+  All-in @ DOT=$1.3: $0.1221
+  Blockspace:           gas=93926  block-fraction=2.00%  full-flows/block=49
+  (Per-block normal gas budget = 4687500 = MAX_BLOCK_WEIGHT × NORMAL_DISPATCH_RATIO / GasScale.)
 
 ── Fee summary by subject ──
-  buyer                gas=  407212  fee= 2.5e-4 DOT  deposit= 4.2e-2 DOT  all-in= 4.2e-2 DOT  ($0.0553)
-  checkpointer         gas= 1158408  fee= 7.3e-4 DOT  deposit= 0     DOT  all-in= 7.3e-4 DOT  ($0.0010)
-  paymaster + operator gas=  778423  fee= 2.5e-4 DOT  deposit= 4.1e-2 DOT  all-in= 4.1e-2 DOT  ($0.0532)
+  buyer           gas=     23227  fee=   2.323e-2 DOT  deposit=          0 DOT  all-in=   2.323e-2 DOT  ($0.0302)
+  checkpointer    gas=     32407  fee=   3.241e-2 DOT  deposit=          0 DOT  all-in=   3.241e-2 DOT  ($0.0421)
+  paymaster + operator gas=     38292  fee=   3.829e-2 DOT  deposit=          0 DOT  all-in=   3.829e-2 DOT  ($0.0498)
 
 ── Gas summary by action ──
-  checkpoint                1158408 gas
-  operator withdraw           78502 gas
-  voucher assignment         332649 gas
-  voucher issuance           407212 gas
-  voucher redemption         362124 gas
+  checkpoint                  32407 gas
+  operator withdraw            8411 gas
+  voucher assignment          13475 gas
+  voucher issuance            23227 gas
+  voucher redemption          16406 gas
+
+13/13 steps passed
 ```
 
 (Exact numbers depend on the upstream block fork and the runtime version
@@ -191,6 +211,33 @@ Useful env vars:
 See [`docs/gas-design.md`](./docs/gas-design.md) for the analytical
 breakdown of these numbers and the stream+checkpoint design that drove
 them.
+
+### Playwright UI variant
+
+Same end-to-end flow, but driven through the three dapps in a headless
+Chromium browser (purchaser → chat user → chat admin → relay). Use this
+when you want to exercise the actual UI code paths (deep-link parsing,
+IDB, signer wiring, render diffing) on top of the same chain backend:
+
+```bash
+# one-time: download the chromium build Playwright uses
+pnpm --filter @community-credits/browser-test run install-browsers
+
+# full UI flow on hardhat-local (auto-spawns hardhat, deploys, runs dapps):
+pnpm --filter @community-credits/browser-test test
+
+# same flow against a chopsticks fork (auto-spawns chopsticks too):
+CHAIN=polkadot pnpm --filter @community-credits/browser-test test
+
+# headed mode (watch it click):
+pnpm --filter @community-credits/browser-test run test:headed
+```
+
+The Playwright suite includes both the happy path and an adversary
+suite (`test/browser/tests/adversary.spec.mjs`: over-balance buy,
+over-spend assign, double-spend, over-redeem, withdraw with no credit).
+The chopsticks limitation above applies here too — the heavy-op txs
+hit the same per-extrinsic cap.
 
 ## Testnet Interactive Demo
 
