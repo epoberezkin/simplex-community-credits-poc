@@ -230,26 +230,47 @@ async function renderUserNotes() {
     host.innerHTML = '<p class="mut">No vouchers yet. Open an <code>?import=…</code> link from the purchaser dapp.</p>';
     return;
   }
+  let totalAssignable = 0n;
+  let totalPending = 0n;
   for (const n of notes) {
     const row = document.createElement('div');
     row.className = 'note-row';
     const leafIdx = cmToLeafIndex.get(n.commitment);
     const pending =
       !n.spent && (leafIdx === undefined || leafIdx >= cpCount);
-    const status = n.spent
-      ? '✓ spent'
-      : pending
-        ? `${n.value} tUSDC (⏳ pending checkpoint)`
-        : `${n.value} tUSDC`;
-    row.innerHTML = `<span>cm ${n.commitment.slice(0, 10)}…</span><span>${status}</span>`;
+    const value = BigInt(n.value);
+    let status, faceColor;
+    if (n.spent) {
+      status = '✓ spent';
+      faceColor = '#999';
+    } else if (pending) {
+      status = '⏳ pending checkpoint';
+      faceColor = '#c80';
+      totalPending += value;
+    } else {
+      status = '✓ spendable';
+      faceColor = '#393';
+      totalAssignable += value;
+    }
+    row.innerHTML =
+      `<span>cm ${n.commitment.slice(0, 10)}… ` +
+      `<strong style="color:${faceColor}">${value} tUSDC</strong></span>` +
+      `<span class="mut">${status}</span>`;
     host.appendChild(row);
     if (!n.spent && !pending) {
       const opt = document.createElement('option');
       opt.value = n.commitment;
-      opt.textContent = `${n.value} (cm ${n.commitment.slice(0, 8)}…)`;
+      opt.textContent = `${value} tUSDC (cm ${n.commitment.slice(0, 8)}…)`;
       sel.appendChild(opt);
     }
   }
+  const totalRow = document.createElement('p');
+  totalRow.className = 'mut';
+  totalRow.style.marginTop = '0.5rem';
+  totalRow.innerHTML =
+    `<strong>Assignable: ${totalAssignable} tUSDC</strong>` +
+    (totalPending > 0n ? ` &nbsp;·&nbsp; pending: ${totalPending} tUSDC` : '');
+  host.appendChild(totalRow);
 }
 
 async function renderAdminNotes() {
@@ -289,26 +310,47 @@ async function renderAdminNotes() {
   host.innerHTML = '';
   const sel = $('redeemNote');
   sel.innerHTML = '';
+  let totalRedeemable = 0n;
+  let totalPending = 0n;
   for (const n of notes) {
     const row = document.createElement('div');
     row.className = 'note-row';
     const leafIdx = cmToLeafIndex.get(n.commitment);
     const pending =
       !n.spent && (leafIdx === undefined || leafIdx >= cpCount);
-    const status = n.spent
-      ? '✓ spent'
-      : pending
-        ? `${n.value} (#${cid}) ⏳ pending`
-        : `${n.value} (#${cid})`;
-    row.innerHTML = `<span>cm ${n.commitment.slice(0, 10)}…</span><span>${status}</span>`;
+    const value = BigInt(n.value);
+    let status, color;
+    if (n.spent) {
+      status = '✓ spent';
+      color = '#999';
+    } else if (pending) {
+      status = '⏳ pending checkpoint';
+      color = '#c80';
+      totalPending += value;
+    } else {
+      status = '✓ redeemable';
+      color = '#393';
+      totalRedeemable += value;
+    }
+    row.innerHTML =
+      `<span>cm ${n.commitment.slice(0, 10)}… ` +
+      `<strong style="color:${color}">${value} tUSDC</strong></span>` +
+      `<span class="mut">${status}</span>`;
     host.appendChild(row);
     if (!n.spent && !pending) {
       const opt = document.createElement('option');
       opt.value = `${cid}:${n.commitment}`;
-      opt.textContent = `${n.value}`;
+      opt.textContent = `${value} tUSDC (cm ${n.commitment.slice(0, 8)}…)`;
       sel.appendChild(opt);
     }
   }
+  const totalRow = document.createElement('p');
+  totalRow.className = 'mut';
+  totalRow.style.marginTop = '0.5rem';
+  totalRow.innerHTML =
+    `<strong>Redeemable: ${totalRedeemable} tUSDC</strong>` +
+    (totalPending > 0n ? ` &nbsp;·&nbsp; pending: ${totalPending} tUSDC` : '');
+  host.appendChild(totalRow);
 }
 
 // ---- prove + relay-handoff flows ----
@@ -402,6 +444,26 @@ async function doAssign() {
       randomness: destRandomness, assigned: 1, redeemerHash,
     }, communityId);
     $('communityImportLink').href = cimport;
+
+    // Optimistic local update: mark the source note spent and stash the
+    // change note in the user scope. The relay will submit the tx; we
+    // assume success rather than wait for a confirmation handshake.
+    await store.markSpent('user', note.commitment);
+    const changeValue = value - destValue;
+    if (changeValue > 0n) {
+      await store.add('user', {
+        commitment: cmChange.toString(),
+        sk: sk.toString(),
+        ownerPkHash: note.ownerPkHash,
+        randomness: changeRandomness.toString(),
+        redeemerHash: '0',
+        value: changeValue.toString(),
+        expiryEpoch: note.expiryEpoch,
+        assigned: 0,
+        spent: false,
+      });
+    }
+    await renderUserNotes();
   } catch (e) {
     status.innerHTML = `<span class="err">${e.message}</span>`;
   }
@@ -464,6 +526,24 @@ async function doRedeem() {
     await QRCode.toCanvas($('redeemQR'), link, { width: 280, margin: 1 });
     $('redeemResult').hidden = false;
     status.innerHTML = '<span class="ok">Redeem proof ready — hand to relay.</span>';
+
+    // Optimistic local update: source note spent. Change note (if any —
+    // partial redeem) lands in the same community scope.
+    await store.markSpent(scope, note.commitment);
+    if (changeValue > 0n) {
+      await store.add(scope, {
+        commitment: cmChange.toString(),
+        sk: note.sk,
+        ownerPkHash: note.ownerPkHash,
+        randomness: changeRandomness.toString(),
+        redeemerHash: note.redeemerHash,
+        value: changeValue.toString(),
+        expiryEpoch: note.expiryEpoch,
+        assigned: 1,
+        spent: false,
+      });
+    }
+    await renderAdminNotes();
   } catch (e) {
     status.innerHTML = `<span class="err">${e.message}</span>`;
   }
@@ -493,28 +573,54 @@ $('scanBtn').onclick = async () => {
 // be permanently "pending" otherwise, and circuits would fail at the
 // merkle membership check.
 async function wipeIfPoolChanged() {
-  if (!cfg.poolAddress) return;
-  const prev = await store.getKey('_pool');
-  const cur = BigInt(cfg.poolAddress);
+  if (!cfg.deployId) return;
+  // Identify a deploy by the deploy-time tag in cfg (set by
+  // tools/deploy.mjs) rather than by poolAddress alone — with hardhat's
+  // state-reset-per-spawn, the deployer's deterministic key sequence
+  // produces identical CREATE addresses each run, so the address can't
+  // distinguish "same deploy reload" from "new deploy at same address".
+  const prev = await store.getKey('_deployId');
+  const cur = BigInt(cfg.deployId);
   if (prev === null) {
-    // True first visit (fresh browser context, IDB empty). Just record
-    // the pool; don't wipe — would race against test/probe setup that
-    // seeds keys right after the page load.
-    await store.putKey('_pool', cur);
+    await store.putKey('_deployId', cur);
     return;
   }
   if (prev === cur) return;
   // Subsequent visit with a different deployed pool — wipe stale notes
   // (they're orphans against the new VoucherPool, would be permanently
   // "pending" and circuit-rejected at the merkle membership check).
-  await new Promise((resolve, reject) => {
-    const req = indexedDB.deleteDatabase('keyval-store');
-    req.onsuccess = () => resolve();
+  // Iterate keys + delete one by one rather than deleteDatabase, since
+  // the latter is `onblocked` by our own already-open IDB connection.
+  const all = await new Promise((resolve, reject) => {
+    const req = indexedDB.open('keyval-store', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('keyval');
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('keyval', 'readwrite');
+      const s = tx.objectStore('keyval');
+      const keys = s.getAllKeys();
+      keys.onsuccess = () => { db.close(); resolve(keys.result); };
+      keys.onerror = () => { db.close(); reject(keys.error); };
+    };
     req.onerror = () => reject(req.error);
-    req.onblocked = () => resolve();   // best-effort
   });
-  await store.putKey('_pool', cur);
-  console.log(`[chat] wiped IDB (pool changed to ${cfg.poolAddress.slice(0, 10)}…)`);
+  for (const k of all) {
+    if (typeof k === 'string' && k !== 'cc:sk:_deployId') {
+      await new Promise((resolve, reject) => {
+        const req = indexedDB.open('keyval-store', 1);
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction('keyval', 'readwrite');
+          tx.objectStore('keyval').delete(k);
+          tx.oncomplete = () => { db.close(); resolve(); };
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+  }
+  await store.putKey('_deployId', cur);
+  console.log(`[chat] wiped IDB (new deploy ${cfg.deployId})`);
 }
 await wipeIfPoolChanged();
 

@@ -101,6 +101,12 @@ if (totalBefore !== null && totalAfter !== null) {
 }
 
 // Write addresses into each dapp's public/config.json.
+// `deployId` is a freshly-generated marker so the chat dapp can detect
+// "new deploy, even at the same address" (hardhat resets state per
+// process spawn and our deterministic deployer key produces identical
+// CREATE addresses each run — without this, stored notes from a
+// previous run would linger as permanently-pending orphans).
+const deployId = Date.now().toString();
 const dappCfg = {
   ethRpcUrl: ETH_RPC_URL,
   chainIdHex,
@@ -112,6 +118,7 @@ const dappCfg = {
   relayBaseUrl: process.env.RELAY_BASE_URL || 'http://localhost:5175/',
   poolAddress: poolAddr,
   stablecoinAddress: tUsdcAddr,
+  deployId,
   // Demo-time pre-configured operator list (so the chat dapp's redeem
   // form is a dropdown, not free-text). Production: discovered from
   // VoucherPool.OperatorRegistered events or a separate registry.

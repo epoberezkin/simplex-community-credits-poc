@@ -37,8 +37,10 @@ let usdc;
 
 const $ = (id) => document.getElementById(id);
 
-// DOT and tUSDC balance, polled every 3s once a signer is wired up.
-function fmtDot(wei) { return (Number(wei) / 1e10).toFixed(4); }
+// eth_getBalance returns 18-decimal wei on both hardhat and pallet-
+// revive's eth-rpc bridge (the bridge rescales the 10-decimal native
+// DOT into 18 decimals for EVM compatibility).
+function fmtDot(wei) { return (Number(wei) / 1e18).toFixed(4); }
 function fmtUsdc(units) { return units.toString(); }
 async function refreshBalances() {
   if (!userAddr || !provider) return;

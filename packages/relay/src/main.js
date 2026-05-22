@@ -38,7 +38,9 @@ let provider;
 let usdc;
 const queue = [];
 
-function fmtDot(wei) { return (Number(wei) / 1e10).toFixed(4); }
+// eth_getBalance returns 18-decimal wei on both hardhat and pallet-
+// revive's eth-rpc bridge.
+function fmtDot(wei) { return (Number(wei) / 1e18).toFixed(4); }
 async function refreshAll() {
   if (!pool || !userAddr || !provider) return;
   try {
@@ -69,7 +71,12 @@ function getDemoKey() {
 
 async function bootDemoMode(key) {
   provider = new ethers.JsonRpcProvider(cfg.ethRpcUrl);
-  signer = new ethers.NonceManager(new ethers.Wallet(key, provider));
+  // No NonceManager — the relay key is also used by the background
+  // checkpoint watcher (tools/checkpoint.mjs --watch). An in-memory
+  // NonceManager would drift behind every watcher submission and trip
+  // NONCE_EXPIRED on the user's next click. Plain Wallet re-queries
+  // `eth_getTransactionCount(addr, 'pending')` per send.
+  signer = new ethers.Wallet(key, provider);
   userAddr = await signer.getAddress();
   pool = new ethers.Contract(cfg.poolAddress, POOL_ABI, signer);
   usdc = new ethers.Contract(cfg.stablecoinAddress, ERC20_ABI, provider);

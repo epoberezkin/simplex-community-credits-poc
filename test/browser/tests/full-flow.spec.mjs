@@ -145,8 +145,10 @@ test('full voucher flow across all three dapps', async ({ browser }) => {
   // user and admin agree without any IDB seeding.
   await adminPage.goto(cImportLink);
   await adminPage.click('#modeAdmin');
-  await expect(adminPage.locator('#adminNotes')).toContainText('(#1)', { timeout: 30_000 });
-  await expect(adminPage.locator('#adminNotes')).not.toContainText('pending');
+  // Note row uses "60 tUSDC" (new format dropped the (#cid) suffix).
+  // Wait until at least one row says "redeemable" (i.e. not pending).
+  await expect(adminPage.locator('#adminNotes')).toContainText('redeemable', { timeout: 30_000 });
+  await expect(adminPage.locator('#redeemNote option')).toHaveCount(1);
 
   // Operator dropdown is populated from cfg.demoOperators by the dapp.
   await adminPage.selectOption('#redeemOperator', { index: 0 });
