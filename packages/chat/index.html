@@ -66,8 +66,8 @@
           pkHash via their own onboarding.
         </span>
       </label>
-      <label>Dest value
-        <input id="destValue" type="number" value="100" />
+      <label>Dest value (tUSDC)
+        <input id="destValue" type="number" value="60" min="0.000001" step="any" />
         <span class="mut">How much of the note goes to the community. The rest becomes a change note you keep.</span>
       </label>
       <button id="proveAssignBtn">Prove + open in relay</button>
@@ -111,8 +111,8 @@
           settlement model).
         </span>
       </label>
-      <label>Redeem value
-        <input id="redeemValue" type="number" value="50" />
+      <label>Redeem value (tUSDC)
+        <input id="redeemValue" type="number" value="50" min="0.000001" step="any" />
         <span class="mut">How much of the note to cash out. Anything less than the note's value lands back in this community as a change note.</span>
       </label>
       <button id="proveRedeemBtn">Prove + open in relay</button>

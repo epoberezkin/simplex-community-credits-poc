@@ -21,12 +21,16 @@ const DECIMALS = 10n; // DOT
 const PLANCK_PER_DOT = 10n ** DECIMALS;
 
 let _api = null;
+let _ethProvider = null;
 export async function connectSubstrate(url = 'ws://127.0.0.1:8000') {
   if (_api) return _api;
   const ws = new WsProvider(url);
   _api = await ApiPromise.create({ provider: ws, noInitWarn: true });
   return _api;
 }
+// Hardhat mode: no substrate. Use eth_getBalance + receipt.gasUsed so the
+// gas-summary still works; fee/storage fields stay zero.
+export function useEthProvider(provider) { _ethProvider = provider; }
 
 export async function disconnectSubstrate() {
   if (_api) {
@@ -43,6 +47,11 @@ export function evmToSubstrate(evmAddr) {
 }
 
 export async function readBalance(evmAddr) {
+  if (_ethProvider) {
+    // Hardhat path — no substrate-side concept of storage deposit.
+    const bal = await _ethProvider.getBalance(evmAddr);
+    return { free: BigInt(bal), reserved: 0n, frozen: 0n, nonce: 0 };
+  }
   const api = await connectSubstrate();
   const subAddr = evmToSubstrate(evmAddr);
   const info = await api.query.system.account(subAddr);
@@ -89,7 +98,9 @@ export async function measured(label, payer, sendFn) {
     gasPrice: receipt?.gasPrice ? BigInt(receipt.gasPrice) : null,
   };
   records.push(rec);
-  printRow(rec);
+  // Skip the per-row DOT noise in hardhat mode (every DOT column is 0).
+  // Hardhat only cares about the gas-by-action summary at the end.
+  if (!_ethProvider) printRow(rec);
   return receipt;
 }
 
@@ -124,6 +135,67 @@ function printRow(r) {
       pctStr +
       '\n',
   );
+}
+
+// Map a wrap-label to an action category. Kept here (not at the call
+// site) so the report groups consistently across hardhat + chopsticks.
+function actionOf(label) {
+  if (/^buyAndCreate|approve|create$/.test(label)) return 'voucher issuance';
+  if (/^assign/.test(label))                       return 'voucher assignment';
+  if (/^redeem/.test(label))                       return 'voucher redemption';
+  if (/^checkpoint/.test(label))                   return 'checkpoint';
+  if (/^withdraw/.test(label))                     return 'operator withdraw';
+  if (/^mint|^registerOperator$/.test(label))      return 'setup';
+  return 'other';
+}
+// Map a payer EVM address (set at wrap call time) to a subject role.
+// flow.test.mjs passes buyerAddr / relayAddr; everything else falls
+// through as 'other'.
+let _subjectRoles = {};
+export function declareSubjects(map) { _subjectRoles = { ...map }; }
+function subjectOf(payer, label) {
+  // Checkpointer might use the relay key for billing; tag by label first.
+  if (/^checkpoint/.test(label)) return 'checkpointer';
+  return _subjectRoles[payer?.toLowerCase()] ?? 'other';
+}
+
+// Aggregator usable by hardhat mode (gas only) or chopsticks mode.
+export function gasReport() {
+  if (records.length === 0) return;
+  console.log('\n── Gas summary by action ──');
+  const byAction = new Map();
+  for (const r of records) {
+    if (r.gasUsed == null) continue;
+    const k = actionOf(r.label);
+    byAction.set(k, (byAction.get(k) ?? 0n) + r.gasUsed);
+  }
+  for (const [k, v] of [...byAction.entries()].sort()) {
+    console.log(`  ${k.padEnd(22)} ${v.toString().padStart(10)} gas`);
+  }
+}
+
+export function subjectFeeReport({ dotUsd = 1.30 } = {}) {
+  if (records.length === 0) return;
+  console.log('\n── Fee summary by subject ──');
+  const bySubject = new Map();
+  for (const r of records) {
+    const s = subjectOf(r.payer, r.label);
+    const row = bySubject.get(s) ?? { fee: 0n, storage: 0n, gas: 0n };
+    row.fee += r.fee ?? 0n;
+    row.storage += r.storageDeposit ?? 0n;
+    if (r.gasUsed != null) row.gas += r.gasUsed;
+    bySubject.set(s, row);
+  }
+  for (const [subj, row] of [...bySubject.entries()].sort()) {
+    const allIn = row.fee + row.storage;
+    console.log(
+      `  ${subj.padEnd(15)} gas=${row.gas.toString().padStart(10)}  ` +
+        `fee=${fmt(row.fee).padStart(11)} DOT  ` +
+        `deposit=${fmt(row.storage).padStart(11)} DOT  ` +
+        `all-in=${fmt(allIn).padStart(11)} DOT` +
+        (allIn > 0n ? `  ($${(Number(allIn) / Number(PLANCK_PER_DOT) * dotUsd).toFixed(4)})` : ''),
+    );
+  }
 }
 
 export function feeReport({ dotUsd = 1.30 } = {}) {

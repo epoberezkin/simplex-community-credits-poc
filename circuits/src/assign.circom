@@ -66,12 +66,19 @@ template Assign(depth) {
     destPos.in[1] <== 0;
     destPos.out === 1;
 
-    // value fits in 64 bits (so changeValue cannot underflow modulo p meaningfully)
+    // value fits in 64 bits
     component valueRange = Num2Bits(64);
     valueRange.in <== value;
 
     component destRange = Num2Bits(64);
     destRange.in <== destValue;
+
+    // changeValue MUST be 64-bit-bounded too; without this, a prover can
+    // set destValue > value so changeValue underflows mod p into a huge
+    // positive field element and `value === destValue + changeValue` still
+    // holds — letting them mint a dest note larger than the source note.
+    component changeRange = Num2Bits(64);
+    changeRange.in <== changeValue;
 
     // 8. Dest commitment
     component redeemerH = Poseidon(1);

@@ -10,6 +10,13 @@
 import './buffer-polyfill.js';
 
 import { ethers } from 'ethers';
+// TestUSDC has 6 decimals — UI is fully human-readable. Strip trailing
+// ".0" so whole-number amounts display as e.g. "100" rather than "100.0".
+function fmtUsdc(raw) {
+  const s = ethers.formatUnits(BigInt(raw), 6);
+  return s.endsWith('.0') ? s.slice(0, -2) : s;
+}
+const parseUsdc = (s) => ethers.parseUnits(String(s), 6);
 import QRCode from 'qrcode';
 import QrScanner from 'qr-scanner';
 import {
@@ -254,13 +261,13 @@ async function renderUserNotes() {
     }
     row.innerHTML =
       `<span>cm ${n.commitment.slice(0, 10)}… ` +
-      `<strong style="color:${faceColor}">${value} tUSDC</strong></span>` +
+      `<strong style="color:${faceColor}">${fmtUsdc(value)} tUSDC</strong></span>` +
       `<span class="mut">${status}</span>`;
     host.appendChild(row);
     if (!n.spent && !pending) {
       const opt = document.createElement('option');
       opt.value = n.commitment;
-      opt.textContent = `${value} tUSDC (cm ${n.commitment.slice(0, 8)}…)`;
+      opt.textContent = `${fmtUsdc(value)} tUSDC (cm ${n.commitment.slice(0, 8)}…)`;
       sel.appendChild(opt);
     }
   }
@@ -268,8 +275,8 @@ async function renderUserNotes() {
   totalRow.className = 'mut';
   totalRow.style.marginTop = '0.5rem';
   totalRow.innerHTML =
-    `<strong>Assignable: ${totalAssignable} tUSDC</strong>` +
-    (totalPending > 0n ? ` &nbsp;·&nbsp; pending: ${totalPending} tUSDC` : '');
+    `<strong>Assignable: ${fmtUsdc(totalAssignable)} tUSDC</strong>` +
+    (totalPending > 0n ? ` &nbsp;·&nbsp; pending: ${fmtUsdc(totalPending)} tUSDC` : '');
   host.appendChild(totalRow);
 }
 
@@ -334,13 +341,13 @@ async function renderAdminNotes() {
     }
     row.innerHTML =
       `<span>cm ${n.commitment.slice(0, 10)}… ` +
-      `<strong style="color:${color}">${value} tUSDC</strong></span>` +
+      `<strong style="color:${color}">${fmtUsdc(value)} tUSDC</strong></span>` +
       `<span class="mut">${status}</span>`;
     host.appendChild(row);
     if (!n.spent && !pending) {
       const opt = document.createElement('option');
       opt.value = `${cid}:${n.commitment}`;
-      opt.textContent = `${value} tUSDC (cm ${n.commitment.slice(0, 8)}…)`;
+      opt.textContent = `${fmtUsdc(value)} tUSDC (cm ${n.commitment.slice(0, 8)}…)`;
       sel.appendChild(opt);
     }
   }
@@ -348,8 +355,8 @@ async function renderAdminNotes() {
   totalRow.className = 'mut';
   totalRow.style.marginTop = '0.5rem';
   totalRow.innerHTML =
-    `<strong>Redeemable: ${totalRedeemable} tUSDC</strong>` +
-    (totalPending > 0n ? ` &nbsp;·&nbsp; pending: ${totalPending} tUSDC` : '');
+    `<strong>Redeemable: ${fmtUsdc(totalRedeemable)} tUSDC</strong>` +
+    (totalPending > 0n ? ` &nbsp;·&nbsp; pending: ${fmtUsdc(totalPending)} tUSDC` : '');
   host.appendChild(totalRow);
 }
 
@@ -387,7 +394,7 @@ async function doAssign() {
   // Demo: derive the dest pkHash from the community id so admin + user
   // agree without copy-paste. (Real flow: paste the admin's published pkHash.)
   const destOwnerPkHash = await demoCommunityPkHash(communityIdStr);
-  const destValue = BigInt($('destValue').value);
+  const destValue = parseUsdc($('destValue').value);
   const status = $('assignStatus');
 
   try {
@@ -465,7 +472,11 @@ async function doAssign() {
     }
     await renderUserNotes();
   } catch (e) {
-    status.innerHTML = `<span class="err">${e.message}</span>`;
+    const human = humanizeProofError(e.message);
+    // Surface to the browser console too, so demo-watchers see rejections
+    // (they don't reach the chain → won't appear in the events feed).
+    console.warn('[chat] proof rejected:', human, '— raw:', e.message);
+    status.innerHTML = `<span class="err">${human}</span>`;
   }
 }
 
@@ -480,7 +491,7 @@ async function doRedeem() {
   const operatorAddr = $('redeemOperator').value.trim();
   if (!operatorAddr) return;
   const operatorId = BigInt(operatorAddr);
-  const redeemValue = BigInt($('redeemValue').value);
+  const redeemValue = parseUsdc($('redeemValue').value);
   const status = $('redeemStatus');
 
   try {
@@ -545,12 +556,69 @@ async function doRedeem() {
     }
     await renderAdminNotes();
   } catch (e) {
-    status.innerHTML = `<span class="err">${e.message}</span>`;
+    const human = humanizeProofError(e.message);
+    // Surface to the browser console too, so demo-watchers see rejections
+    // (they don't reach the chain → won't appear in the events feed).
+    console.warn('[chat] proof rejected:', human, '— raw:', e.message);
+    status.innerHTML = `<span class="err">${human}</span>`;
   }
+}
+
+// Circuit assertion failures come back as "Error: Assert Failed. Error
+// in template Assign_NNN line: XX". Map common ones to human text.
+function humanizeProofError(msg) {
+  if (!msg) return 'unknown proof error';
+  if (/template (Assign|Redeem)_\d+ line: \d+/.test(msg)) {
+    return (
+      'Circuit rejected the proof. Most common cause: you tried to ' +
+      'spend more than the note holds, or the value is outside the ' +
+      '64-bit range. The original assertion was: ' + msg
+    );
+  }
+  return msg;
 }
 
 $('proveAssignBtn').onclick = doAssign;
 $('proveRedeemBtn').onclick = doRedeem;
+
+// Live over-spend / over-redeem warnings on the value inputs. The user
+// is still allowed to click — they get to see the circuit reject the
+// proof — but the warning makes the eventual error self-explanatory.
+function selectedValue(selectId, scope) {
+  return async () => {
+    const v = $(selectId).value;
+    if (!v) return 0n;
+    const all = await store.list(scope);
+    const cm = scope === 'user' ? v : v.split(':')[1];
+    const n = all.find((x) => x.commitment === cm);
+    return n ? BigInt(n.value) : 0n;
+  };
+}
+const getAssignNoteValue = selectedValue('assignNote', 'user');
+async function getRedeemNoteValue() {
+  const v = $('redeemNote').value;
+  if (!v) return 0n;
+  const [c, cm] = v.split(':');
+  const all = await store.list(`community-${c}`);
+  const n = all.find((x) => x.commitment === cm);
+  return n ? BigInt(n.value) : 0n;
+}
+function attachOverspendWarning(valueId, noteSelectId, statusId, getNoteValueFn, label) {
+  const fn = async () => {
+    const want = parseUsdc($(valueId).value || '0');
+    const have = await getNoteValueFn();
+    const s = $(statusId);
+    if (have > 0n && want > have) {
+      s.innerHTML = `<span class="err">⚠ ${label} (${fmtUsdc(want)} tUSDC) exceeds the note's value (${fmtUsdc(have)} tUSDC). The circuit will reject this — try anyway if you want to see the failure.</span>`;
+    } else if (s.querySelector?.('.err')?.textContent?.includes('exceeds')) {
+      s.innerHTML = '';
+    }
+  };
+  $(valueId).addEventListener('input', fn);
+  $(noteSelectId).addEventListener('change', fn);
+}
+attachOverspendWarning('destValue',   'assignNote', 'assignStatus', getAssignNoteValue, 'Dest value');
+attachOverspendWarning('redeemValue', 'redeemNote', 'redeemStatus', getRedeemNoteValue, 'Redeem value');
 
 // ---- QR scanner ----
 

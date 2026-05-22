@@ -7,7 +7,8 @@
     "compile": "node scripts/compile.mjs",
     "setup": "node scripts/setup.mjs",
     "verifiers": "node scripts/verifiers.mjs",
-    "build": "pnpm run compile && pnpm run setup && pnpm run verifiers",
+    "sync-dapps": "node scripts/sync-dapps.mjs",
+    "build": "pnpm run compile && pnpm run setup && pnpm run verifiers && pnpm run sync-dapps",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

@@ -66,11 +66,14 @@ function loadPoolInterface() {
 }
 
 const provider = new ethers.JsonRpcProvider(ETH_RPC_URL);
+const ERC20_BAL_ABI = ['function balanceOf(address) view returns (uint256)'];
 
 let manifest = loadDeploy();
 let poolIface = loadPoolInterface();
+let usdc = manifest?.tUsdcAddress ? new ethers.Contract(manifest.tUsdcAddress, ERC20_BAL_ABI, provider) : null;
 
-let lastBalances = new Map();        // label → BigInt
+let lastDot = new Map();             // label → BigInt
+let lastUsdc = new Map();            // label → BigInt
 let lastBlock = await provider.getBlockNumber().catch(() => 0);
 let registeredFilter = false;
 
@@ -78,17 +81,39 @@ async function refreshDeployArtifacts() {
   if (!manifest || !poolIface) {
     manifest = loadDeploy();
     poolIface = loadPoolInterface();
+    if (manifest?.tUsdcAddress && !usdc) {
+      usdc = new ethers.Contract(manifest.tUsdcAddress, ERC20_BAL_ABI, provider);
+    }
   }
 }
 
+function fmtUsdc(units) {
+  return `${units} (= ${(Number(units) / 1e6).toFixed(6)} tUSDC)`;
+}
 async function reportBalanceDelta(blockNumber) {
   for (const { label, address } of ACCOUNTS) {
-    let bal;
-    try { bal = await provider.getBalance(address, blockNumber); } catch { continue; }
-    const prev = lastBalances.get(label);
-    lastBalances.set(label, bal);
-    if (prev !== undefined && bal !== prev) {
-      console.log(`balance  ${label}  ${fmtDot(bal - prev)}  (now ${fmtDot(bal)})`);
+    // DOT (gas).
+    try {
+      const bal = await provider.getBalance(address, blockNumber);
+      const prev = lastDot.get(label);
+      lastDot.set(label, bal);
+      if (prev !== undefined && bal !== prev) {
+        console.log(`balance  ${label}  DOT  ${fmtDot(bal - prev)}  (now ${fmtDot(bal)})`);
+      }
+    } catch {}
+    // tUSDC (stablecoin) — only when we know the deployed contract address.
+    if (usdc) {
+      try {
+        const bal = await usdc.balanceOf(address);
+        const prev = lastUsdc.get(label);
+        lastUsdc.set(label, bal);
+        if (prev !== undefined && bal !== prev) {
+          const delta = bal - prev;
+          const sign = delta < 0n ? '-' : '+';
+          const abs = delta < 0n ? -delta : delta;
+          console.log(`balance  ${label}  tUSDC ${sign}${abs}  (now ${fmtUsdc(bal)})`);
+        }
+      } catch {}
     }
   }
 }

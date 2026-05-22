@@ -38,10 +38,15 @@ let usdc;
 const $ = (id) => document.getElementById(id);
 
 // eth_getBalance returns 18-decimal wei on both hardhat and pallet-
-// revive's eth-rpc bridge (the bridge rescales the 10-decimal native
-// DOT into 18 decimals for EVM compatibility).
+// revive's eth-rpc bridge.
 function fmtDot(wei) { return (Number(wei) / 1e18).toFixed(4); }
-function fmtUsdc(units) { return units.toString(); }
+// TestUSDC has 6 decimals — UI is fully human-readable. Strip trailing
+// ".0" so whole-number amounts display as e.g. "100" rather than "100.0".
+function fmtUsdc(raw) {
+  const s = ethers.formatUnits(raw, 6);
+  return s.endsWith('.0') ? s.slice(0, -2) : s;
+}
+function parseUsdc(s) { return ethers.parseUnits(String(s), 6); }
 async function refreshBalances() {
   if (!userAddr || !provider) return;
   try {
@@ -136,7 +141,7 @@ function unpackProof(flat) {
 }
 
 async function buy() {
-  const value = BigInt($('value').value);
+  const value = parseUsdc($('value').value);
   const expiryEpoch = BigInt($('expiryEpoch').value);
   const status = $('buyStatus');
   $('goBuy').disabled = true;

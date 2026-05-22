@@ -41,19 +41,18 @@
       <div id="wallets"></div>
       <p id="walletStatus" class="mut">Not connected</p>
       <p id="balances" class="mut" hidden>
-        DOT: <strong id="balDot">—</strong>
-        &nbsp;·&nbsp;
+        DOT (gas): <strong id="balDot">—</strong><br />
         tUSDC: <strong id="balUsdc">—</strong>
       </p>
     </section>
 
     <section id="buy" class="card" hidden>
       <h2 style="font-size:1rem">Buy voucher</h2>
-      <label>Value (tUSDC, 6 decimals)
-        <input id="value" type="number" value="1000" min="1" />
+      <label>Value (tUSDC)
+        <input id="value" type="number" value="100" min="0.000001" step="any" />
       </label>
       <label>Expiry epoch
-        <input id="expiryEpoch" type="number" value="100" min="1" />
+        <input id="expiryEpoch" type="number" value="9999" min="1" />
       </label>
       <button id="goBuy">Prove + buyAndCreate</button>
       <div id="buyStatus" class="mut"></div>

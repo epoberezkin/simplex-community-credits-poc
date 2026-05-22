@@ -9,6 +9,7 @@
 import { ethers } from 'ethers';
 import { spawn } from 'node:child_process';
 import { setTimeout as wait } from 'node:timers/promises';
+import net from 'node:net';
 
 import {
   generateKeypair,
@@ -34,6 +35,7 @@ import { proveCreate, proveAssign, proveRedeem, proveCheckpoint } from '@communi
 import { deployAll } from './deploy.mjs';
 import {
   connectSubstrate, disconnectSubstrate, measured, feeReport,
+  useEthProvider, gasReport, subjectFeeReport, declareSubjects,
 } from './fees.mjs';
 
 // ---------------------------------------------------------------- helpers ---
@@ -77,6 +79,23 @@ function assertOk(cond, msg) {
 
 let hardhatProc = null;
 async function startHardhatNode() {
+  // Refuse to start if something is already listening on :8545.
+  // Common cause: a stray `eth-rpc` / chopsticks bridge from a previous
+  // `pnpm demo CHAIN=polkadot` session — same port, different chainId,
+  // which ethers picks up as "network changed" mid-test.
+  const inUse = await new Promise((resolve) => {
+    const s = net.connect({ port: 8545, host: '127.0.0.1' });
+    s.once('connect', () => { s.destroy(); resolve(true); });
+    s.once('error',   () => { s.destroy(); resolve(false); });
+    setTimeout(() => { s.destroy(); resolve(false); }, 500);
+  });
+  if (inUse) {
+    throw new Error(
+      'port :8545 is already taken — likely a stale chopsticks eth-rpc.\n' +
+        '  Kill it: pkill -f eth-rpc ; pkill -f chopsticks\n' +
+        '  (eth-rpc db may need wiping too: rm -f ~/.local/share/eth-rpc/eth-rpc.db*)',
+    );
+  }
   return new Promise((resolve, reject) => {
     const p = spawn(
       'npx',
@@ -198,14 +217,14 @@ async function main() {
     const subUrl = process.env.CHOPSTICKS_WS_URL || 'ws://127.0.0.1:8000';
     console.log('  substrate WS:', subUrl);
     await connectSubstrate(subUrl);
+  } else {
+    // Hardhat: feed `measured` an eth provider so it can still record
+    // free-balance delta + gasUsed. Fee/deposit columns stay 0 on
+    // hardhat (no substrate-side storage rent), but the action gas
+    // summary is what we surface to the README quick-start.
+    useEthProvider(provider);
   }
-  const wrap = measureFees
-    ? (label, payer, sendFn) => measured(label, payer, sendFn)
-    : async (_label, _payer, sendFn) => {
-        const tx = await sendFn();
-        if (tx?.wait) return tx.wait();
-        return tx;
-      };
+  const wrap = (label, payer, sendFn) => measured(label, payer, sendFn);
 
   // Local mirror of the *checkpointed* tree state. Updated only after a
   // checkpoint is submitted on-chain. The chat dapp rebuilds the same
@@ -566,7 +585,16 @@ async function main() {
     assertEq(dec.sk, n.sk, 'note.sk');
   });
 
-  if (measureFees) feeReport();
+  // Summaries
+  declareSubjects({
+    [buyerAddr.toLowerCase()]: 'buyer',
+    [relayAddr.toLowerCase()]: 'paymaster + operator',
+  });
+  if (measureFees) {
+    feeReport();
+    subjectFeeReport();
+  }
+  gasReport();
 
   console.log(`\n${testsRun - testsFailed}/${testsRun} steps passed`);
   if (measureFees) await disconnectSubstrate();

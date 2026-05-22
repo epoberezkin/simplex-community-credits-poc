@@ -75,6 +75,13 @@ template Redeem(depth) {
     component redeemRange = Num2Bits(64);
     redeemRange.in <== redeemValue;
 
+    // changeValue MUST also be 64-bit-bounded. Without this, a prover can
+    // claim redeemValue > value so changeValue underflows mod p into a
+    // huge positive field element while `value === redeemValue + changeValue`
+    // still holds — letting them mint more credit than the note's value.
+    component changeRange = Num2Bits(64);
+    changeRange.in <== changeValue;
+
     // 8. Change commitment (same owner, same redeemer, same epoch)
     component chCm = NoteCommitment();
     chCm.value <== changeValue;

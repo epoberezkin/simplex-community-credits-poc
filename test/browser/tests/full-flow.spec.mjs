@@ -190,7 +190,7 @@ test('full voucher flow across all three dapps', async ({ browser }) => {
   const relayCreditAfter = await pool.credit(relayAddr);
   const relayUsdcAfter = await tUsdc.balanceOf(relayAddr);
   expect(relayCreditAfter - relayCreditBefore).toBe(0n);          // credit cleared by withdraw
-  expect(relayUsdcAfter - relayUsdcBefore).toBe(60n);             // 60 tUSDC moved to relay
+  expect(relayUsdcAfter - relayUsdcBefore).toBe(60_000_000n);     // 60 tUSDC moved to relay (6 decimals)
 
   // Cleanup contexts (Playwright closes the browser automatically).
   await buyer.close();

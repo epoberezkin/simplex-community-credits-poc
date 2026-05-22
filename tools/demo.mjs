@@ -223,7 +223,22 @@ async function main() {
     await sleep(800);
   }
 
-  // ---- 3. deploy ----
+  // ---- 3a. rebuild contracts ----
+  // Belt + suspenders: ensures contracts/artifacts is in sync with the
+  // current circuits/contracts/verifiers/*.sol. Without this a circuit
+  // regen leaves the dapp emitting new-format proofs that the deployed
+  // (stale) verifier rejects with "pool/proof". Hardhat caches when
+  // sources are unchanged, so this is a no-op in the common case.
+  console.log('[demo] hardhat compile (no-op if cached)…');
+  await new Promise((res, rej) => {
+    const c = spawn('pnpm', ['--filter', 'contracts', 'run', 'build'], {
+      stdio: 'inherit', cwd: REPO_ROOT,
+    });
+    c.on('exit', (code) => code === 0 ? res() : rej(new Error(`contracts build exited ${code}`)));
+    c.on('error', rej);
+  });
+
+  // ---- 3b. deploy ----
   console.log('[demo] deploying contracts…');
   const depEnv = { ETH_RPC_URL: RPC_URL };
   if (CHAIN === 'hardhat') depEnv.TX_GAS = '15000000'; // hardhat caps gas at ~30M

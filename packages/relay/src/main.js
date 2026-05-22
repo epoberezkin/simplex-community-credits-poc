@@ -38,6 +38,23 @@ let provider;
 let usdc;
 const queue = [];
 
+// Retry helper for NONCE_EXPIRED — the relay key is shared with the
+// background checkpoint watcher, so two processes can pick the same
+// pending nonce in the window between read and send.
+async function sendWithNonceRetry(fn, attempts = 4) {
+  for (let i = 1; i <= attempts; i++) {
+    try { return await fn(); }
+    catch (e) {
+      const msg = e.shortMessage || e.message || '';
+      if (i < attempts && (e.code === 'NONCE_EXPIRED' || /nonce/i.test(msg))) {
+        await new Promise((r) => setTimeout(r, 400));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 // eth_getBalance returns 18-decimal wei on both hardhat and pallet-
 // revive's eth-rpc bridge.
 function fmtDot(wei) { return (Number(wei) / 1e18).toFixed(4); }
@@ -49,9 +66,13 @@ async function refreshAll() {
       usdc.balanceOf(userAddr),
       pool.credit(userAddr),
     ]);
+    const human = (raw) => {
+      const s = ethers.formatUnits(raw, 6);
+      return s.endsWith('.0') ? s.slice(0, -2) : s;
+    };
     $('balDot').textContent = fmtDot(dot);
-    $('balUsdc').textContent = u.toString();
-    $('creditBal').textContent = c.toString();
+    $('balUsdc').textContent = human(u);
+    $('creditBal').textContent = human(c);
   } catch { /* RPC blip; try again next tick */ }
 }
 setInterval(refreshAll, 3_000);
@@ -207,12 +228,11 @@ async function submitBundle(idx) {
   inFlight.set(idx, '⏳ sending…');
   renderQueue();
   try {
-    let tx;
-    if (item.kind === 'assign') {
-      tx = await pool.assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC);
-    } else {
-      tx = await pool.redeem(b.nullifier, b.expiryEpoch, b.redeemValue, b.cmChange, b.root, b.operatorId, pA, pB, pC);
-    }
+    const tx = await sendWithNonceRetry(() =>
+      item.kind === 'assign'
+        ? pool.assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC)
+        : pool.redeem(b.nullifier, b.expiryEpoch, b.redeemValue, b.cmChange, b.root, b.operatorId, pA, pB, pC),
+    );
     inFlight.set(idx, `⏳ mining ${tx.hash.slice(0, 10)}…`);
     renderQueue();
     await tx.wait();
@@ -259,7 +279,7 @@ $('withdrawBtn').onclick = async () => {
       return;
     }
     status.textContent = 'Submitting withdraw…';
-    await (await pool.withdraw(c)).wait();
+    await (await sendWithNonceRetry(() => pool.withdraw(c))).wait();
     status.innerHTML = `<span class="ok">Withdrew ${c} tUSDC.</span>`;
     await refreshAll();
   } catch (e) {

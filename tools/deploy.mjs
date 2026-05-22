@@ -24,7 +24,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 
 const ETH_RPC_URL = process.env.ETH_RPC_URL || 'http://localhost:8545';
-const TUSDC_MINT = BigInt(process.env.TUSDC_MINT || '1000000');  // 1 unit at 6 decimals
+// Mint 1,000,000 tUSDC (6 decimals → 10^12 base units) to the buyer so
+// the demo has comfortable headroom — earlier 1-tUSDC mint was too small
+// for the default voucher amounts.
+const TUSDC_MINT = BigInt(process.env.TUSDC_MINT || '1000000000000');
 const EPOCH_SIZE = BigInt(process.env.EPOCH_SIZE || '100');
 const TX_GAS = process.env.TX_GAS ? BigInt(process.env.TX_GAS) : 100_000_000n;
 
