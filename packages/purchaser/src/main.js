@@ -19,6 +19,7 @@ import {
   connectEvm,
 } from '@community-credits/core';
 import { proveCreateBrowser } from '@community-credits/core/proof-browser';
+import { buildInspectorPanel } from '@community-credits/core/educational';
 
 const cfg = await fetch('./config.json').then((r) => r.json());
 
@@ -155,9 +156,8 @@ async function buy() {
     });
 
     status.textContent = 'Proving create (~0.5–1 s)…';
-    const { proofFlat } = await proveCreateBrowser({
-      ownerPkHash, randomness, cm, value, expiryEpoch,
-    });
+    const createInputs = { ownerPkHash, randomness, cm, value, expiryEpoch };
+    const { proofFlat } = await proveCreateBrowser(createInputs);
     const { pA, pB, pC } = unpackProof(proofFlat);
 
     status.textContent = 'Approving tUSDC…';
@@ -173,7 +173,7 @@ async function buy() {
     await showResult({
       value, expiryEpoch, ownerPkHash, randomness,
       assigned: 0, redeemerHash: 0n, sk,
-    });
+    }, createInputs);
   } catch (e) {
     console.error(e);
     status.innerHTML = `<span class="err">${e.shortMessage || e.message}</span>`;
@@ -182,13 +182,25 @@ async function buy() {
   }
 }
 
-async function showResult(note) {
+async function showResult(note, createInputs) {
   $('result').hidden = false;
   const link = buildImportLink(cfg.chatBaseUrl, note);
   $('chatLink').href = link;
   $('chatLink').textContent = 'Open in chat dapp →';
   $('noteDump').textContent = link;
   await QRCode.toCanvas($('qr'), link, { width: 280, margin: 1 });
+  // Replace any prior inspector so re-buys don't accumulate panels.
+  const host = $('result');
+  host.querySelectorAll('details.cc-inspector').forEach((n) => n.remove());
+  const panel = buildInspectorPanel({
+    circuit: 'create',
+    proveInputs: createInputs,
+    handoverKind: 'note',
+    handoverPayload: note,
+    handoverUrl: link,
+  });
+  panel.classList.add('cc-inspector');
+  host.appendChild(panel);
 }
 
 $('goBuy').addEventListener('click', buy);

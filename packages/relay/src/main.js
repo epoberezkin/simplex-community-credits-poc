@@ -15,6 +15,7 @@ import {
   discoverProviders,
   connectEvm,
 } from '@community-credits/core';
+import { buildInspectorPanel } from '@community-credits/core/educational';
 
 const cfg = await fetch('./config.json').then((r) => r.json());
 
@@ -170,7 +171,9 @@ function addToQueue(url) {
     alert(`This dapp only handles assign/redeem (got ${parsed.kind})`);
     return;
   }
-  queue.push(parsed);
+  // Keep the original URL alongside the parsed bundle so the per-row
+  // inspector can show the on-wire size of the handover.
+  queue.push({ ...parsed, sourceUrl: url });
   renderQueue();
 }
 
@@ -183,6 +186,8 @@ function renderQueue() {
     return;
   }
   queue.forEach((item, i) => {
+    // Outer wrapper so the per-row inspector sits *under* the label/Submit row.
+    const wrap = document.createElement('div');
     const row = document.createElement('div');
     row.className = 'row';
     const b = item.bundle;
@@ -216,7 +221,14 @@ function renderQueue() {
     }
     row.appendChild(left);
     row.appendChild(right);
-    host.appendChild(row);
+    wrap.appendChild(row);
+    // No witness on the relay side — only the decoded handover is shown.
+    wrap.appendChild(buildInspectorPanel({
+      handoverKind: item.kind,
+      handoverPayload: b,
+      handoverUrl: item.sourceUrl,
+    }));
+    host.appendChild(wrap);
   });
 }
 

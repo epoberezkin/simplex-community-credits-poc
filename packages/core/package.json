@@ -19,7 +19,8 @@
     "./proof": "./src/proof.js",
     "./proof-browser": "./src/proof.browser.js",
     "./eip6963": "./src/eip6963.js",
-    "./identity": "./src/identity.js"
+    "./identity": "./src/identity.js",
+    "./educational": "./src/educational.js"
   },
   "scripts": {
     "test": "node --test src/*.test.js"

@@ -35,6 +35,7 @@ import {
   demoCommunityPkHash,
 } from '@community-credits/core';
 import { openStore } from '@community-credits/core/store';
+import { buildInspectorPanel } from '@community-credits/core/educational';
 
 const cfg = await fetch('./config.json').then((r) => r.json());
 
@@ -426,20 +427,22 @@ async function doAssign() {
     });
 
     status.textContent = 'Proving in worker (~1 s)…';
-    const r = await callWorker('assign', {
+    const assignInputs = {
       sk, value, expiryEpoch, randomness,
       pathElements, pathIndices,
       destValue, destOwnerPkHash, destRandomness,
       redeemerId: communityId, changeRandomness,
       root, nullifier, expiryEpochPub: expiryEpoch,
       cmDest, cmChange,
-    });
+    };
+    const r = await callWorker('assign', assignInputs);
 
-    const link = buildAssignLink(cfg.relayBaseUrl, {
+    const assignBundle = {
       nullifier, expiryEpoch: Number(expiryEpoch),
       cmDest, cmChange, root,
       proof: r.proofFlat.map((x) => BigInt(x)),
-    });
+    };
+    const link = buildAssignLink(cfg.relayBaseUrl, assignBundle);
     $('assignLink').href = link;
     await QRCode.toCanvas($('assignQR'), link, { width: 280, margin: 1 });
     $('assignResult').hidden = false;
@@ -451,6 +454,19 @@ async function doAssign() {
       randomness: destRandomness, assigned: 1, redeemerHash,
     }, communityId);
     $('communityImportLink').href = cimport;
+
+    // Educational inspector — private inputs + decoded handover.
+    const result = $('assignResult');
+    result.querySelectorAll('details.cc-inspector').forEach((n) => n.remove());
+    const panel = buildInspectorPanel({
+      circuit: 'assign',
+      proveInputs: assignInputs,
+      handoverKind: 'assign',
+      handoverPayload: assignBundle,
+      handoverUrl: link,
+    });
+    panel.classList.add('cc-inspector');
+    result.appendChild(panel);
 
     // Optimistic local update: mark the source note spent and stash the
     // change note in the user scope. The relay will submit the tx; we
@@ -519,24 +535,39 @@ async function doRedeem() {
     });
 
     status.textContent = 'Proving redeem in worker…';
-    const r = await callWorker('redeem', {
+    const redeemInputs = {
       sk, value, expiryEpoch, randomness,
       redeemerHash, redeemerId: BigInt(cid),
       pathElements, pathIndices,
       changeRandomness, changeValue,
       root, nullifier, expiryEpochPub: expiryEpoch,
       redeemValue, cmChange, operatorId,
-    });
+    };
+    const r = await callWorker('redeem', redeemInputs);
 
-    const link = buildRedeemLink(cfg.relayBaseUrl, {
+    const redeemBundle = {
       nullifier, expiryEpoch: Number(expiryEpoch),
       redeemValue, cmChange, root, operatorId,
       proof: r.proofFlat.map((x) => BigInt(x)),
-    });
+    };
+    const link = buildRedeemLink(cfg.relayBaseUrl, redeemBundle);
     $('redeemLink').href = link;
     await QRCode.toCanvas($('redeemQR'), link, { width: 280, margin: 1 });
     $('redeemResult').hidden = false;
     status.innerHTML = '<span class="ok">Redeem proof ready — hand to relay.</span>';
+
+    // Educational inspector — private inputs + decoded handover.
+    const result = $('redeemResult');
+    result.querySelectorAll('details.cc-inspector').forEach((n) => n.remove());
+    const panel = buildInspectorPanel({
+      circuit: 'redeem',
+      proveInputs: redeemInputs,
+      handoverKind: 'redeem',
+      handoverPayload: redeemBundle,
+      handoverUrl: link,
+    });
+    panel.classList.add('cc-inspector');
+    result.appendChild(panel);
 
     // Optimistic local update: source note spent. Change note (if any —
     // partial redeem) lands in the same community scope.
