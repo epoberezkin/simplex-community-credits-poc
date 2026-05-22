@@ -18,7 +18,13 @@ import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deployAll } from '../test/e2e/deploy.mjs';
-import { deployerWallet, buyerWallet, relayWallet } from './keys.mjs';
+import {
+  deployerWallet,
+  buyerWalletA, buyerWalletB,
+  relayWalletA, relayWalletB,
+  buyerWallets, relayWallets,
+} from './keys.mjs';
+import { demoCommunityPkHash } from '../packages/core/src/identity.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -86,17 +92,21 @@ const { tUsdc, pool, createV, assignV, redeemV, checkpointV } = await trackFee('
 const tUsdcAddr = await tUsdc.getAddress();
 const poolAddr = await pool.getAddress();
 
-// Mint tUSDC to the buyer + register the relay as an operator.
-console.log(`> minting ${TUSDC_MINT} tUSDC to buyer ${buyerWallet.address}…`);
-await trackFee('mint', async () => {
-  const r = await (await tUsdc.connect(admin).mint(buyerWallet.address, TUSDC_MINT, txOpts)).wait();
-  console.log(`  tx ${r.hash.slice(0, 14)}…  gas ${r.gasUsed}`);
-});
-console.log(`> registering relay ${relayWallet.address} as operator…`);
-await trackFee('registerOperator', async () => {
-  const r = await (await pool.connect(admin).registerOperator(relayWallet.address, txOpts)).wait();
-  console.log(`  tx ${r.hash.slice(0, 14)}…  gas ${r.gasUsed}`);
-});
+// Mint tUSDC to each end-user + register each relay as an operator.
+for (const w of buyerWallets) {
+  console.log(`> minting ${TUSDC_MINT} tUSDC to ${w.address}…`);
+  await trackFee('mint', async () => {
+    const r = await (await tUsdc.connect(admin).mint(w.address, TUSDC_MINT, txOpts)).wait();
+    console.log(`  tx ${r.hash.slice(0, 14)}…  gas ${r.gasUsed}`);
+  });
+}
+for (const w of relayWallets) {
+  console.log(`> registering relay ${w.address} as operator…`);
+  await trackFee('registerOperator', async () => {
+    const r = await (await pool.connect(admin).registerOperator(w.address, txOpts)).wait();
+    console.log(`  tx ${r.hash.slice(0, 14)}…  gas ${r.gasUsed}`);
+  });
+}
 
 const totalAfter = await getDot(deployerWallet.address);
 if (totalBefore !== null && totalAfter !== null) {
@@ -122,11 +132,20 @@ const dappCfg = {
   poolAddress: poolAddr,
   stablecoinAddress: tUsdcAddr,
   deployId,
-  // Demo-time pre-configured operator list (so the chat dapp's redeem
-  // form is a dropdown, not free-text). Production: discovered from
-  // VoucherPool.OperatorRegistered events or a separate registry.
+  // Demo-time pre-configured subject lists so each dapp can render
+  // quick-pick buttons. Real flows: buyers/relays bring their own keys,
+  // communities publish their pkHash via their own onboarding.
+  demoBuyers: [
+    { label: 'User A', address: buyerWalletA.address, privateKey: buyerWalletA.privateKey },
+    { label: 'User B', address: buyerWalletB.address, privateKey: buyerWalletB.privateKey },
+  ],
   demoOperators: [
-    { name: 'demo relay', address: relayWallet.address },
+    { label: 'Relay A', name: 'Relay A', address: relayWalletA.address, privateKey: relayWalletA.privateKey },
+    { label: 'Relay B', name: 'Relay B', address: relayWalletB.address, privateKey: relayWalletB.privateKey },
+  ],
+  demoCommunities: [
+    { label: 'Community A', cid: '1', pkHash: (await demoCommunityPkHash('1')).toString() },
+    { label: 'Community B', cid: '2', pkHash: (await demoCommunityPkHash('2')).toString() },
   ],
 };
 const dappDirs = ['purchaser', 'chat', 'relay'];
@@ -152,8 +171,8 @@ const manifest = {
   redeemVerifier: await redeemV.getAddress(),
   checkpointVerifier: await checkpointV.getAddress(),
   deployer: deployerWallet.address,
-  buyer: buyerWallet.address,
-  relay: relayWallet.address,
+  buyers: buyerWallets.map((w) => w.address),
+  relays: relayWallets.map((w) => w.address),
   deployedAt: new Date().toISOString(),
 };
 const manifestPath = resolve(__dirname, 'last-deploy.json');

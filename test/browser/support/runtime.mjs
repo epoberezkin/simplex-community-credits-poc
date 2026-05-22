@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import net from 'node:net';
 import { ethers } from 'ethers';
-import { deployerWallet, buyerWallet, relayWallet } from '../../../tools/keys.mjs';
+import { deployerWallet, buyerWallets, relayWallets } from '../../../tools/keys.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..', '..', '..');
@@ -53,35 +53,38 @@ async function waitForTcp(port, timeoutMs) {
 // Used as the default chain backend for browser-e2e — fast (~5s) and
 // reliable, at the cost of fee/runtime realism (no pallet-revive).
 export async function ensureHardhat() {
+  let started = false;
+  let child = null;
   if (await isTcpOpen(HARDHAT_PORT)) {
     console.log(`[browser-e2e] hardhat already up on :${HARDHAT_PORT} — reusing`);
-    return { started: false };
+  } else {
+    console.log(`[browser-e2e] starting hardhat node on :${HARDHAT_PORT}…`);
+    child = spawn(
+      'pnpm',
+      ['--filter', 'contracts', 'exec', 'hardhat', 'node', '--port', String(HARDHAT_PORT)],
+      {
+        cwd: REPO_ROOT,
+        env: process.env,
+        stdio: ['ignore', 'inherit', 'inherit'],
+        detached: false,
+      },
+    );
+    child.unref();
+    await waitForTcp(HARDHAT_PORT, 60_000);
+    await sleep(500); // give RPC a moment after socket opens
+    started = true;
   }
-  console.log(`[browser-e2e] starting hardhat node on :${HARDHAT_PORT}…`);
-  const child = spawn(
-    'pnpm',
-    ['--filter', 'contracts', 'exec', 'hardhat', 'node', '--port', String(HARDHAT_PORT)],
-    {
-      cwd: REPO_ROOT,
-      env: process.env,
-      stdio: ['ignore', 'inherit', 'inherit'],
-      detached: false,
-    },
-  );
-  child.unref();
-  await waitForTcp(HARDHAT_PORT, 60_000);
-  // Give hardhat's RPC a moment to actually accept connections after the
-  // socket is open.
-  await sleep(500);
-  // Fund the three PoC keys (deployer/buyer/relay). On a fresh hardhat
-  // node only the default-mnemonic accounts are funded; our keys are
-  // derived from PoC-unique seeds and have zero balance.
+  // Fund the five PoC keys (deployer + 2 buyers + 2 relays). On a fresh
+  // hardhat node only the default-mnemonic accounts are funded; our keys
+  // are derived from PoC-unique seeds and have zero balance. Run on
+  // every invocation so that an already-up hardhat from a previous,
+  // 3-key version of this file also gets the new keys topped up.
   const provider = new ethers.JsonRpcProvider(`http://localhost:${HARDHAT_PORT}`);
-  for (const w of [deployerWallet, buyerWallet, relayWallet]) {
+  for (const w of [deployerWallet, ...buyerWallets, ...relayWallets]) {
     await provider.send('hardhat_setBalance', [w.address, '0x21e19e0c9bab2400000']); // 10000 ETH
   }
-  console.log(`[browser-e2e] hardhat up + PoC keys funded`);
-  return { started: true, pid: child.pid };
+  console.log(`[browser-e2e] hardhat ${started ? 'up' : 'reused'} + PoC keys funded`);
+  return { started, pid: child?.pid };
 }
 
 export async function killHardhat(pid) {

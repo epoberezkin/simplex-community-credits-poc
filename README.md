@@ -37,6 +37,13 @@ docs/            tutorial + gas-design notes
   ```
   On macOS use `circom-macos-amd64` (or build from source via
   `cargo install --git https://github.com/iden3/circom`).
+- Fetch **ptau-17**
+  ```bash
+  mkdir -p ptau
+  curl -L https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_17.ptau \
+      -o ptau/powersOfTau28_hez_final_17.ptau
+  ``` 
+  
 
 Hardhat downloads `solc` automatically on first `contracts` build — no
 separate install needed for the quick-start path. (`resolc` + `eth-rpc`
@@ -109,20 +116,66 @@ Open the purchaser Dapp in any browser and follow the instructions in the dapp.
 The chain backend defaults to hardhat-local (fast, reliable). Stop with
 Ctrl+C; restart `pnpm demo` to reset.
 
-### Demo flow
+### Subjects
+
+The demo ships with **two of each role** — pick whichever side you want
+to play, or run the full 2×2×2 flow described below. Each dapp's wallet
+section renders a quick-pick button per subject (sourced from
+`cfg.demoBuyers` / `cfg.demoOperators` / `cfg.demoCommunities` written by
+`tools/deploy.mjs`):
+
+- **End users** — User A, User B. Each buys vouchers in the purchaser
+  and (in a fresh chat tab) assigns them to a community.
+- **Communities** — Community A (cid=1), Community B (cid=2). Each gets
+  its own chat-admin tab to redeem incoming dest notes.
+- **Relays** — Relay A, Relay B. The chat-admin picks one per redeem;
+  the relay dapp lets you switch identity in-place before submitting.
+
+The default URLs printed by `pnpm demo` load User A / Relay A; click the
+A-vs-B button in either dapp to switch.
+
+### Demo flow (single subject — the quick happy path)
 
 Open all three URLs in separate browser tabs, then run through the
-voucher lifecycle:
+voucher lifecycle for one user and one community:
 
 1. **Purchaser tab** — enter `value=100`, `expiryEpoch=9999`, click **Buy**.
 2. **Purchaser tab** — click the emitted `Open in chat dapp →` link to import the note.
 3. **Chat tab (User mode)** — wait ~5 s for the new voucher to flip from `⏳ pending checkpoint` to `✓ spendable`.
-4. **Chat tab (User mode)** — pick the voucher, pick **demo community**, set **Dest value = 60**, click **Prove + open in relay**.
+4. **Chat tab (User mode)** — pick the voucher, pick **Community A**, set **Dest value = 60**, click **Prove + open in relay**.
 5. **Relay tab** — paste the relay URL from chat into the queue input, then **Submit** to land the assign tx on chain.
 6. **Chat tab (User mode)** — observe: the original 100 voucher is `✓ spent`; a 40-value change voucher appears (after the next checkpoint).
 7. **Chat tab** — click the `Community-import link →` from step 4's assign-result panel.
-8. **Chat tab (Community admin mode)** — wait for the dest voucher to become `✓ redeemable`, then pick it, pick **demo relay**, click **Prove + open in relay**.
+8. **Chat tab (Community admin mode)** — wait for the dest voucher to become `✓ redeemable`, then pick it, pick **Relay A**, click **Prove + open in relay**.
 9. **Relay tab** — paste the redeem URL, **Submit**, then **Withdraw all credit**.
+
+### Demo flow (2×2×2 — exercising every subject)
+
+For a realistic flow with two of each, repeat the steps above with the
+following distribution. Final credit lands as **Relay A = 10, Relay B = 16**.
+
+1. **Buys.** In the purchaser, hit **Use User A**, buy `100`. Switch to
+   **Use User B**, buy `100`.
+2. **Assigns by User A.** Open the User A import link in a fresh chat
+   tab. Assign **20 → Community A**, submit in the relay using **Use Relay A**.
+   Wait for the change note to become spendable, then assign
+   **30 → Community B**, submit (again Relay A).
+3. **Assigns by User B.** Same as step 2 but in a *separate* chat tab
+   (different browser profile / private window keeps IDB scoped), starting
+   from the User B import link.
+4. **Redeems by Community A.** Open both Community A `community-import`
+   links from step 2/3 in a chat tab in **Admin mode**. Redeem
+   **5 → Relay A** from the first note, then **8 → Relay B** from the
+   second. Submit each in the relay dapp using the matching A/B button.
+5. **Redeems by Community B.** Same as step 4 but with Community B's
+   community-import links.
+6. **Withdraws.** In the relay dapp pick **Use Relay A** and withdraw 10;
+   then **Use Relay B** and withdraw 16.
+
+Each proof panel in the chat / purchaser dapps has a 🔍 *Inspect* details
+section showing the private inputs (red), public inputs (blue) and the
+decoded handover payload (sk in dark orange, public-input overlaps in blue,
+neither in black) — useful for following exactly what each role sees.
 
 ### What a successful run looks like
 

@@ -52,7 +52,7 @@ import-storage:
       # (pallet-revive keeps its own AccountInfo nonce).
       #
       # Instead derive deterministic keys from PoC-unique seeds:
-      #   keccak256("simplex-community-credits-poc-{deployer,buyer,relay}-v1")
+      #   keccak256("simplex-community-credits-poc-{deployer,buyer,buyer-b,relay,relay-b}-v1")
       # and prefund the substrate-mapped AccountId32 of each (last 12 bytes
       # 0xee per pallet-revive's address mapping).
       #
@@ -71,14 +71,25 @@ import-storage:
         - providers: 1
           data:
             free: '1000000000000000000'
+      # buyer-b   pk 0xe6cb… → EVM 0x58B27Df274Bd56aCA17c221dC7FACe4380225762
+      - - - '0x58b27df274bd56aca17c221dc7face4380225762eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+      # relay-b   pk 0x84cb… → EVM 0xD60ca14FEe3F9E1343c420589c0678eF451Ee429
+      - - - '0xd60ca14fee3f9e1343c420589c0678ef451ee429eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '1000000000000000000'
 
   Assets:
     Account:
       # tUSDC asset id 1984 — same convention as USDT on Asset Hub
       - [ [ 1984, 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY ], { balance: 1000000000000 } ]
       - [ [ 1984, 5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty ], { balance: 1000000000000 } ]
-      # The buyer EOA needs tUSDC for buyAndCreate.
+      # Both buyer EOAs need tUSDC for buyAndCreate.
       - [ [ 1984, '0x23d9453a70370de312825458b7e49539871025ebeeeeeeeeeeeeeeeeeeeeeeee' ], { balance: 1000000000000 } ]
+      - [ [ 1984, '0x58b27df274bd56aca17c221dc7face4380225762eeeeeeeeeeeeeeeeeeeeeeee' ], { balance: 1000000000000 } ]
     Asset:
       - [ [ 1984 ], {
           owner: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,

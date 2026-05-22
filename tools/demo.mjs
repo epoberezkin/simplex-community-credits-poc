@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import net from 'node:net';
 import { ethers } from 'ethers';
-import { buyerWallet, relayWallet, deployerWallet } from './keys.mjs';
+import { buyerWallets, relayWallets, deployerWallet, buyerWalletA, relayWalletA } from './keys.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -177,7 +177,7 @@ async function main() {
       // (derived from public strings in tools/keys.mjs) start with 0 ETH;
       // top them up via hardhat_setBalance.
       const provider = new ethers.JsonRpcProvider(RPC_URL);
-      for (const w of [deployerWallet, buyerWallet, relayWallet]) {
+      for (const w of [deployerWallet, ...buyerWallets, ...relayWallets]) {
         await provider.send('hardhat_setBalance', [w.address, '0x21e19e0c9bab2400000']); // 10000 ETH
       }
       console.log(`[demo] hardhat up + PoC keys funded.`);
@@ -267,14 +267,17 @@ async function main() {
   await waitTcp(5174, 60_000, 'chat :5174');
   await waitTcp(5175, 60_000, 'relay :5175');
 
-  const bk = buyerWallet.privateKey;
-  const rk = relayWallet.privateKey;
+  // Default the URLs to subject "A". Both dapps render quick-pick buttons
+  // sourced from cfg.demoBuyers / cfg.demoOperators, so the human can
+  // switch identity in-place — no separate URL needed per subject.
+  const bk = buyerWalletA.privateKey;
+  const rk = relayWalletA.privateKey;
   console.log('\n================================================================');
   console.log(`  DEMO READY (CHAIN=${CHAIN}) — open these URLs:`);
   console.log('================================================================');
-  console.log(`  Purchaser  http://localhost:5173/?demoKey=${bk}`);
-  console.log(`  Chat       http://localhost:5174/`);
-  console.log(`  Relay      http://localhost:5175/?demoKey=${rk}`);
+  console.log(`  Purchaser  http://localhost:5173/?demoKey=${bk}    (defaults to User A; switch to B in-app)`);
+  console.log(`  Chat       http://localhost:5174/                                  (User + Admin modes for both communities)`);
+  console.log(`  Relay      http://localhost:5175/?demoKey=${rk}    (defaults to Relay A; switch to B in-app)`);
   console.log('================================================================');
   console.log('  demoKey is in the URL — reload-safe, bookmarkable.');
   if (CHAIN === 'hardhat') {

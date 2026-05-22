@@ -8,10 +8,10 @@
 # Usage:
 #   CHAIN=polkadot ./chopsticks/run.sh
 #
-# Prefund block: three deterministic-but-PoC-unique EOAs (deployer / buyer
-# / relay) whose substrate-mapped accounts (h160 || 0xee*12) hold:
+# Prefund block: five deterministic-but-PoC-unique EOAs (deployer +
+# two buyers + two relays) whose substrate-mapped accounts (h160 || 0xee*12) hold:
 #   - 1000 DOT free balance for gas and storage_deposit lockup
-#   - 10000 USDT (asset id 1984) for the buyer to spend
+#   - 10000 USDT (asset id 1984) for each buyer to spend
 # These accounts are very unlikely to have any on-chain history on Polkadot,
 # so the DuplicateContract trap we hit with Hardhat keys doesn't apply.
 
@@ -48,6 +48,16 @@ import-storage:
         - providers: 1
           data:
             free: '10000000000000'
+      # buyer-b   pk 0xe6cb… → EVM 0x58B27Df274Bd56aCA17c221dC7FACe4380225762
+      - - - '0x58b27df274bd56aca17c221dc7face4380225762eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '10000000000000'
+      # relay-b   pk 0x84cb… → EVM 0xD60ca14FEe3F9E1343c420589c0678eF451Ee429
+      - - - '0xd60ca14fee3f9e1343c420589c0678ef451ee429eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '10000000000000'
 
   # USDT on Polkadot Asset Hub is asset id 1984 (canonical). The contract
   # uses an ERC20 mock (TestUSDC) deployed at e2e startup, so this prefund
@@ -56,3 +66,4 @@ import-storage:
   Assets:
     Account:
       - [ [ 1984, '0x23d9453a70370de312825458b7e49539871025ebeeeeeeeeeeeeeeeeeeeeeeee' ], { balance: 10000000000 } ]
+      - [ [ 1984, '0x58b27df274bd56aca17c221dc7face4380225762eeeeeeeeeeeeeeeeeeeeeeee' ], { balance: 10000000000 } ]

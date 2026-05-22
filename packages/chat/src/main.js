@@ -723,19 +723,20 @@ async function wipeIfPoolChanged() {
 }
 await wipeIfPoolChanged();
 
-// Populate the demo-community + operator dropdowns from cfg. Hardcoded
-// single demo community for now; relays come from the deploy manifest.
-const DEMO_COMMUNITIES = [{ id: '1', label: 'demo community (cid=1)' }];
-for (const c of DEMO_COMMUNITIES) {
+// Populate the assign-community + redeem-operator dropdowns from the
+// deploy manifest. Both lists carry {label, cid|address, …} so the user
+// can pick any demo community / relay without copy-paste.
+const demoCommunities = cfg.demoCommunities ?? [{ cid: '1', label: 'Community A (cid=1)' }];
+for (const c of demoCommunities) {
   const o = document.createElement('option');
-  o.value = c.id;
-  o.textContent = c.label;
+  o.value = c.cid;
+  o.textContent = `${c.label} (cid=${c.cid})`;
   $('assignCommunity').appendChild(o);
 }
 for (const op of (cfg.demoOperators ?? [])) {
   const o = document.createElement('option');
   o.value = op.address;
-  o.textContent = `${op.name} (${op.address.slice(0, 10)}…)`;
+  o.textContent = `${op.label || op.name} (${op.address.slice(0, 10)}…)`;
   $('redeemOperator').appendChild(o);
 }
 

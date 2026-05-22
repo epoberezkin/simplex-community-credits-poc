@@ -24,7 +24,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { deployerWallet, buyerWallet, relayWallet } from './keys.mjs';
+import { deployerWallet, buyerWalletA, buyerWalletB, relayWalletA, relayWalletB } from './keys.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -39,8 +39,10 @@ const POLL_DEPLOY_MS = Number(process.env.EVENTS_POLL_MS || 6000);
 
 const ACCOUNTS = [
   { label: 'deployer', address: deployerWallet.address },
-  { label: 'buyer',    address: buyerWallet.address },
-  { label: 'relay',    address: relayWallet.address },
+  { label: 'userA',    address: buyerWalletA.address },
+  { label: 'userB',    address: buyerWalletB.address },
+  { label: 'relayA',   address: relayWalletA.address },
+  { label: 'relayB',   address: relayWalletB.address },
 ];
 
 function fmtDot(wei) {

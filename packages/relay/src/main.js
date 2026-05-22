@@ -82,9 +82,6 @@ setInterval(refreshAll, 3_000);
 // and uses a local ethers.Wallet against cfg.ethRpcUrl. URL is the only
 // source of truth — reload preserves it (browser keeps the query). URL
 // with the key IS the bookmark.
-const TEST_RELAY_KEY = ethers.keccak256(
-  ethers.toUtf8Bytes('simplex-community-credits-poc-relay-v1'),
-);
 
 function getDemoKey() {
   const k = new URL(location.href).searchParams.get('demoKey');
@@ -102,9 +99,7 @@ async function bootDemoMode(key) {
   userAddr = await signer.getAddress();
   pool = new ethers.Contract(cfg.poolAddress, POOL_ABI, signer);
   usdc = new ethers.Contract(cfg.stablecoinAddress, ERC20_ABI, provider);
-  $('wallets').innerHTML =
-    '<p class="err" style="background:#fee;padding:0.4rem;border-radius:4px">' +
-    '⚠ Demo mode — using local key. Do NOT use on a real chain.</p>';
+  renderDemoSubjects(key);
   $('walletStatus').textContent = `demo • ${userAddr}`;
   $('walletStatus').className = 'ok';
   $('queue').hidden = false;
@@ -113,27 +108,55 @@ async function bootDemoMode(key) {
   await checkInboundUrl();
 }
 
+// Subject picker — kept visible after bootDemoMode so a human can switch
+// Relay A ↔ B in-place. Active key is highlighted; click another to
+// re-boot with that key (also re-imports the current ?assign=/?redeem=).
+function renderDemoSubjects(activeKey) {
+  const host = $('wallets');
+  host.innerHTML =
+    '<p class="err" style="background:#fee;padding:0.4rem;border-radius:4px">' +
+    '⚠ Demo mode — using local key. Do NOT use on a real chain.</p>';
+  for (const op of (cfg.demoOperators || [])) {
+    if (!op.privateKey) continue;
+    const btn = document.createElement('button');
+    const active = activeKey && op.privateKey.toLowerCase() === activeKey.toLowerCase();
+    btn.textContent = `${active ? '✓ ' : ''}Use ${op.label || op.name}`;
+    btn.onclick = () => bootDemoMode(op.privateKey);
+    btn.style.background = active ? '#cfc' : '#fee';
+    btn.style.marginRight = '0.3rem';
+    btn.disabled = active;
+    host.appendChild(btn);
+  }
+}
+
 async function renderWallets() {
   const list = await discoverProviders();
   const host = $('wallets');
   host.innerHTML = '';
-  // Test-key shortcut — always available.
-  const demoBtn = document.createElement('button');
-  demoBtn.textContent = 'Use built-in test key (demo)';
-  demoBtn.onclick = () => bootDemoMode(TEST_RELAY_KEY);
-  demoBtn.style.background = '#fee';
-  host.appendChild(demoBtn);
+  // Quick-pick buttons for each registered demo operator. cfg.demoOperators
+  // carries `{label, address, privateKey}` per relay so a human can switch
+  // identity in-place without changing the URL.
+  const ops = cfg.demoOperators || [];
+  for (const op of ops) {
+    if (!op.privateKey) continue;            // real operators have no key in cfg
+    const btn = document.createElement('button');
+    btn.textContent = `Use ${op.label || op.name} (demo)`;
+    btn.onclick = () => bootDemoMode(op.privateKey);
+    btn.style.background = '#fee';
+    btn.style.marginRight = '0.3rem';
+    host.appendChild(btn);
+  }
   for (const w of list) {
     const b = document.createElement('button');
     b.textContent = `Connect ${w.info.name}`;
     b.onclick = () => connect(w.provider, w.info.name);
     host.appendChild(b);
   }
-  if (list.length === 0) {
+  if (list.length === 0 && ops.length === 0) {
     const p = document.createElement('p');
     p.className = 'mut';
     p.style.marginTop = '0.4rem';
-    p.textContent = 'No extension wallet detected. Use the test key for a local demo.';
+    p.textContent = 'No extension wallet detected. Use one of the demo keys above for a local demo.';
     host.appendChild(p);
   }
 }

@@ -12,9 +12,22 @@ function deriveKey(role) {
 }
 
 export const deployerWallet = deriveKey('deployer');
-export const buyerWallet = deriveKey('buyer');
-export const relayWallet = deriveKey('relay');
+
+// Two end users and two relays. A-side keeps the legacy role names
+// (buyer-v1 / relay-v1) so the existing chopsticks-yaml prefund entries
+// + adversary suite + checkpoint script stay valid without churn.
+export const buyerWalletA = deriveKey('buyer');
+export const buyerWalletB = deriveKey('buyer-b');
+export const relayWalletA = deriveKey('relay');
+export const relayWalletB = deriveKey('relay-b');
+
+export const buyerWallets = [buyerWalletA, buyerWalletB];
+export const relayWallets = [relayWalletA, relayWalletB];
+
+// Legacy single-subject aliases.
+export const buyerWallet = buyerWalletA;
+export const relayWallet = relayWalletA;
 
 export const DEPLOYER_PRIVATE_KEY = deployerWallet.privateKey;
-export const BUYER_PRIVATE_KEY = buyerWallet.privateKey;
-export const RELAY_PRIVATE_KEY = relayWallet.privateKey;
+export const BUYER_PRIVATE_KEY = buyerWalletA.privateKey;
+export const RELAY_PRIVATE_KEY = relayWalletA.privateKey;

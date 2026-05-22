@@ -66,9 +66,6 @@ setInterval(refreshBalances, 3_000);
 // and uses a local ethers.Wallet against cfg.ethRpcUrl. URL is the only
 // source of truth — reload preserves it (browser keeps the query), close
 // + reopen forgets. The URL with the key IS the bookmark.
-const TEST_BUYER_KEY = ethers.keccak256(
-  ethers.toUtf8Bytes('simplex-community-credits-poc-buyer-v1'),
-);
 
 function getDemoKey() {
   const k = new URL(location.href).searchParams.get('demoKey');
@@ -80,31 +77,53 @@ async function bootDemoMode(key) {
   signer = new ethers.NonceManager(new ethers.Wallet(key, provider));
   userAddr = await signer.getAddress();
   usdc = new ethers.Contract(cfg.stablecoinAddress, ERC20_ABI, provider);
-  $('wallets').innerHTML =
-    '<p class="err" style="background:#fee;padding:0.4rem;border-radius:4px">' +
-    '⚠ Demo mode — using local key. Do NOT use on a real chain.</p>';
+  renderDemoSubjects(key);
   $('walletStatus').textContent = `demo • ${userAddr}`;
   $('walletStatus').className = 'ok';
   $('buy').hidden = false;
   await refreshBalances();
 }
 
+// Subject picker — visible even after bootDemoMode so a human can switch
+// User A ↔ B in-place. The active key is highlighted.
+function renderDemoSubjects(activeKey) {
+  const host = $('wallets');
+  host.innerHTML =
+    '<p class="err" style="background:#fee;padding:0.4rem;border-radius:4px">' +
+    '⚠ Demo mode — using local key. Do NOT use on a real chain.</p>';
+  for (const b of (cfg.demoBuyers || [])) {
+    const btn = document.createElement('button');
+    const active = activeKey && b.privateKey?.toLowerCase() === activeKey.toLowerCase();
+    btn.textContent = `${active ? '✓ ' : ''}Use ${b.label}`;
+    btn.onclick = () => bootDemoMode(b.privateKey);
+    btn.style.background = active ? '#cfc' : '#fee';
+    btn.style.marginRight = '0.3rem';
+    btn.disabled = active;
+    host.appendChild(btn);
+  }
+}
+
 async function renderWallets() {
   const list = await discoverProviders();
   const host = $('wallets');
   host.innerHTML = '';
-  // Test-key shortcut — always available, so a user without MetaMask
-  // can still drive the demo.
-  const demoBtn = document.createElement('button');
-  demoBtn.textContent = 'Use built-in test key (demo)';
-  demoBtn.onclick = () => bootDemoMode(TEST_BUYER_KEY);
-  demoBtn.style.background = '#fee';
-  host.appendChild(demoBtn);
+  // Quick-pick buttons for each demo subject. One button per buyer in
+  // cfg.demoBuyers (deploy.mjs populates "User A", "User B"); switching
+  // mid-session just calls bootDemoMode with the new key.
+  const buyers = cfg.demoBuyers || [];
+  for (const b of buyers) {
+    const btn = document.createElement('button');
+    btn.textContent = `Use ${b.label} (demo)`;
+    btn.onclick = () => bootDemoMode(b.privateKey);
+    btn.style.background = '#fee';
+    btn.style.marginRight = '0.3rem';
+    host.appendChild(btn);
+  }
   if (list.length === 0) {
     const p = document.createElement('p');
     p.className = 'mut';
     p.style.marginTop = '0.4rem';
-    p.textContent = 'No extension wallet detected. Use the test key for a local demo, or install MetaMask for a real wallet.';
+    p.textContent = 'No extension wallet detected. Use one of the demo keys above for a local demo, or install MetaMask for a real wallet.';
     host.appendChild(p);
     return;
   }

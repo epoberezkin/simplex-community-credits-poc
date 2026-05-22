@@ -15,9 +15,11 @@ import {
   generateKeypair,
   deriveCommitment,
   deriveNullifier,
+  deriveOwnerPkHash,
   randomFieldElement,
   IncrementalMerkleTree,
   redeemerHashFromId,
+  demoCommunitySk,
   encodeNote,
   decodeNote,
   encodeAssign,
@@ -162,8 +164,8 @@ async function main() {
   const target = process.env.TARGET || 'hardhat';
 
   let provider;
-  let buyer;
-  let relay;
+  let buyerA, buyerB;
+  let relayA, relayB;
   let admin;
 
   if (target === 'hardhat') {
@@ -171,17 +173,19 @@ async function main() {
     hardhatProc = await startHardhatNode();
     await wait(500);
     provider = new ethers.JsonRpcProvider('http://127.0.0.1:8545');
-    const wallets = (await provider.send('eth_accounts', [])).slice(0, 3);
     const pks = [
-      // Hardhat default mnemonic, accounts 0-2
+      // Hardhat default mnemonic, accounts 0-4
       '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
       '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
       '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a',
+      '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6',
+      '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a',
     ];
-    admin = new ethers.NonceManager(new ethers.Wallet(pks[0], provider));
-    buyer = new ethers.NonceManager(new ethers.Wallet(pks[1], provider));
-    relay = new ethers.NonceManager(new ethers.Wallet(pks[2], provider));
-    void wallets;
+    admin  = new ethers.NonceManager(new ethers.Wallet(pks[0], provider));
+    buyerA = new ethers.NonceManager(new ethers.Wallet(pks[1], provider));
+    relayA = new ethers.NonceManager(new ethers.Wallet(pks[2], provider));
+    buyerB = new ethers.NonceManager(new ethers.Wallet(pks[3], provider));
+    relayB = new ethers.NonceManager(new ethers.Wallet(pks[4], provider));
   } else if (target === 'chopsticks') {
     // Deterministic-but-PoC-unique deployer/buyer/relay keys; the substrate-
     // mapped versions are prefunded with PAS (+ tUSDC for the buyer) in
@@ -210,14 +214,20 @@ async function main() {
       );
     }
     provider = new ethers.JsonRpcProvider(url);
+    // Five PoC-derived keys — must match the chopsticks/*.yml prefund
+    // block and tools/keys.mjs derivations.
     const pks = [
       '0x8f596c90dbdbe79218062ae45fafaf92e3efecbfe9695007e273e5c82d732f27', // deployer
-      '0x72a4e571c864f09fdd0ab7ea50e4bbbb060ab18c9250b5c41a4877ad81761885', // buyer
-      '0x1a7cd30490ac27d8c1fd65a942fc9bb2af050119f2140a0e8413ff70cc324822', // relay
+      '0x72a4e571c864f09fdd0ab7ea50e4bbbb060ab18c9250b5c41a4877ad81761885', // buyer  (A)
+      '0x1a7cd30490ac27d8c1fd65a942fc9bb2af050119f2140a0e8413ff70cc324822', // relay  (A)
+      '0xe6cbf1d150bca3707ac1e57c24210fccc98ab18b19f285204aaee10b32e078aa', // buyer-b
+      '0x84cb4bc63c318930019de582331821f26350c5d8536c597aa3aa37a63952cba3', // relay-b
     ];
-    admin = new ethers.NonceManager(new ethers.Wallet(pks[0], provider));
-    buyer = new ethers.NonceManager(new ethers.Wallet(pks[1], provider));
-    relay = new ethers.NonceManager(new ethers.Wallet(pks[2], provider));
+    admin  = new ethers.NonceManager(new ethers.Wallet(pks[0], provider));
+    buyerA = new ethers.NonceManager(new ethers.Wallet(pks[1], provider));
+    relayA = new ethers.NonceManager(new ethers.Wallet(pks[2], provider));
+    buyerB = new ethers.NonceManager(new ethers.Wallet(pks[3], provider));
+    relayB = new ethers.NonceManager(new ethers.Wallet(pks[4], provider));
   } else {
     throw new Error(`unknown TARGET=${target}`);
   }
@@ -235,10 +245,16 @@ async function main() {
   console.log('  pool   :', await pool.getAddress());
   console.log('  tUSDC  :', await tUsdc.getAddress());
 
-  const buyerAddr = await buyer.getAddress();
-  const relayAddr = await relay.getAddress();
-  await (await tUsdc.connect(admin).mint(buyerAddr, 1_000_000n, callOpts)).wait();
-  await (await pool.connect(admin).registerOperator(relayAddr, callOpts)).wait();
+  const buyerAAddr = await buyerA.getAddress();
+  const buyerBAddr = await buyerB.getAddress();
+  const relayAAddr = await relayA.getAddress();
+  const relayBAddr = await relayB.getAddress();
+  for (const addr of [buyerAAddr, buyerBAddr]) {
+    await (await tUsdc.connect(admin).mint(addr, 1_000_000n, callOpts)).wait();
+  }
+  for (const addr of [relayAAddr, relayBAddr]) {
+    await (await pool.connect(admin).registerOperator(addr, callOpts)).wait();
+  }
 
   // Fee measurement (chopsticks only). Connect to chopsticks's substrate WS
   // so we can read system.account.{free, reserved} before/after each tx.
@@ -263,12 +279,16 @@ async function main() {
   const mirror = new IncrementalMerkleTree();
   // Commitments streamed but not yet rolled into a checkpoint.
   const pendingStream = []; // bigint[]
-  const buyerStore = new NoteStore();
-  const communityStore = new NoteStore();
+  // Per-subject note stores.
+  const userAStore       = new NoteStore();
+  const userBStore       = new NoteStore();
+  const communityAStore  = new NoteStore();
+  const communityBStore  = new NoteStore();
 
   // Drain the pendingStream by submitting one checkpoint per commitment
   // (PoC uses BATCH=1; production should batch B≥8 — see docs/gas-design.md
-  // §3b for the design and §5 for the cost analysis).
+  // §3b for the design and §5 for the cost analysis). Bills checkpointing
+  // to relayA since both relays are valid checkpointers.
   async function drainCheckpoints() {
     while (pendingStream.length > 0) {
       const oldCount = Number(await pool.checkpointedCount());
@@ -276,8 +296,8 @@ async function main() {
       const { input } = await buildCheckpointInput({ mirror, cm, oldCount });
       const { proofFlat } = await proveCheckpoint(input);
       const { pA, pB, pC } = unpackProof(proofFlat);
-      await wrap(`checkpoint #${oldCount + 1}`, relayAddr, () =>
-        pool.connect(relay).checkpoint(
+      await wrap(`checkpoint #${oldCount + 1}`, relayAAddr, () =>
+        pool.connect(relayA).checkpoint(
           input.newRoot, input.newCount, pA, pB, pC, callOpts,
         ),
       );
@@ -285,330 +305,283 @@ async function main() {
     }
   }
 
-  // ----------------------------------------------------------- buy/mint ---
+  // ----------------------------------------------------------- 2x2x2 flow ---
+  //
+  // Two end users, two communities, two relay operators. Each user buys
+  // one voucher (100), assigns 20 to commA + 30 to commB. Each community
+  // then redeems 5 with relayA + 8 with relayB. Final credit: relayA = 10,
+  // relayB = 16. See README §"Local Interactive Demo" for the same flow
+  // walked through the dapps.
 
-  // Buyer key (per-voucher).
-  const buyerKp = await generateKeypair();
-  const randomness = randomFieldElement();
-  const value = 1000n;
-  const expiryEpoch = 100n;
-  const cm = await deriveCommitment({
-    value,
-    expiryEpoch,
-    ownerPkHash: buyerKp.ownerPkHash,
-    randomness,
-    assigned: 0n,
-    redeemerHash: 0n,
-  });
+  const expiryEpoch     = 100n;
+  const BUY_VALUE       = 100n;
+  const TO_COMM_A       = 20n;
+  const TO_COMM_B       = 30n;
+  const REDEEM_TO_RA    = 5n;
+  const REDEEM_TO_RB    = 8n;
 
-  let importLink;
-  await step('Dapp A — buyer proves create + buyAndCreate', async () => {
+  const userAKp = await generateKeypair();
+  const userBKp = await generateKeypair();
+  // Communities use deterministic sks (cid → keccak → field) so user
+  // (assigner) and admin (redeemer) agree on pkHash without coordination.
+  const communityAId   = 1n;
+  const communityBId   = 2n;
+  const communityASk   = demoCommunitySk(communityAId);
+  const communityBSk   = demoCommunitySk(communityBId);
+  const communityAKp   = { sk: communityASk, ownerPkHash: await deriveOwnerPkHash(communityASk) };
+  const communityBKp   = { sk: communityBSk, ownerPkHash: await deriveOwnerPkHash(communityBSk) };
+  const redeemerHashA  = await redeemerHashFromId(communityAId);
+  const redeemerHashB  = await redeemerHashFromId(communityBId);
+
+  // --- shared helpers used by every step ---
+  async function doBuy(userKp, signer, signerAddr, label) {
+    const r  = randomFieldElement();
+    const cm = await deriveCommitment({
+      value: BUY_VALUE, expiryEpoch, ownerPkHash: userKp.ownerPkHash,
+      randomness: r, assigned: 0n, redeemerHash: 0n,
+    });
     const { proofFlat } = await proveCreate({
-      ownerPkHash: buyerKp.ownerPkHash,
-      randomness,
-      cm,
-      value,
-      expiryEpoch,
+      ownerPkHash: userKp.ownerPkHash, randomness: r, cm,
+      value: BUY_VALUE, expiryEpoch,
     });
     const { pA, pB, pC } = unpackProof(proofFlat);
-
     const poolAddr = await pool.getAddress();
-    await wrap('approve', buyerAddr, () =>
-      tUsdc.connect(buyer).approve(poolAddr, value, callOpts),
+    await wrap(`approve ${label}`, signerAddr, () =>
+      tUsdc.connect(signer).approve(poolAddr, BUY_VALUE, callOpts),
     );
-    let txr;
-    try {
-      txr = await wrap('buyAndCreate', buyerAddr, () =>
-        pool.connect(buyer).buyAndCreate(cm, value, Number(expiryEpoch), pA, pB, pC, callOpts),
-      );
-    } catch (e) {
-      // First on-chain tx — every subsequent step depends on it. Bail
-      // out with a tag so the cascade of follow-on errors gets suppressed.
-      e.abortRest = true;
-      e.abortReason = 'buyAndCreate failed — subsequent steps depend on it';
-      throw e;
-    }
-
-    const poolBal = await tUsdc.balanceOf(await pool.getAddress());
-    assertEq(poolBal, value, 'pool balance');
-    assertEq(await tUsdc.balanceOf(buyerAddr), 1_000_000n - value, 'buyer balance');
-
-    // Find emitted leaf index from the VoucherCreated log (the stream
-    // position; not yet a tree leaf index — that's set at checkpoint time).
+    const txr = await wrap(`buyAndCreate ${label}`, signerAddr, () =>
+      pool.connect(signer).buyAndCreate(cm, BUY_VALUE, Number(expiryEpoch), pA, pB, pC, callOpts),
+    );
     const ev = txr.logs
-      .map((l) => {
-        try { return pool.interface.parseLog(l); } catch { return null; }
-      })
+      .map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
       .find((p) => p && p.name === 'VoucherCreated');
-    assertOk(ev, 'VoucherCreated event');
-    const leafIndex = Number(ev.args.leafIndex);
-    // cm is in the stream — NOT in the mirror yet. drainCheckpoints below
-    // will roll it into the tree.
+    assertOk(ev, `VoucherCreated event (${label})`);
     pendingStream.push(cm);
+    return {
+      commitment: cm.toString(), leafIndex: Number(ev.args.leafIndex),
+      sk: userKp.sk, ownerPkHash: userKp.ownerPkHash, randomness: r,
+      value: BUY_VALUE, expiryEpoch, assigned: 0, redeemerHash: 0n,
+      scope: 'self', spent: false,
+    };
+  }
 
-    // Buyer hands the note to chat via deep link.
-    importLink = buildImportLink('https://chat.example/', {
-      value, expiryEpoch, ownerPkHash: buyerKp.ownerPkHash, randomness,
-      assigned: 0, redeemerHash: 0n, sk: buyerKp.sk,
+  async function doAssign(src, dstKp, dstCid, dstRedeemerHash, dstValue,
+                          submitter, submitterAddr, label) {
+    const { pathElements, pathIndices, root } = await mirror.proof(src.leafIndex);
+    const nullifier      = await deriveNullifier(src.sk, BigInt(src.commitment));
+    const destRandomness   = randomFieldElement();
+    const changeRandomness = randomFieldElement();
+    const changeValue      = src.value - dstValue;
+    const cmDest = await deriveCommitment({
+      value: dstValue, expiryEpoch: src.expiryEpoch,
+      ownerPkHash: dstKp.ownerPkHash, randomness: destRandomness,
+      assigned: 1n, redeemerHash: dstRedeemerHash,
     });
-
-    buyerStore.add({
-      commitment: cm.toString(), leafIndex, sk: buyerKp.sk,
-      ownerPkHash: buyerKp.ownerPkHash, randomness, value, expiryEpoch,
-      assigned: 0, redeemerHash: 0n, scope: 'self', spent: false,
+    const cmChange = await deriveCommitment({
+      value: changeValue, expiryEpoch: src.expiryEpoch,
+      ownerPkHash: src.ownerPkHash, randomness: changeRandomness,
+      assigned: 0n, redeemerHash: 0n,
     });
-  });
-
-  await step('checkpoint after buy', async () => {
-    await drainCheckpoints();
-    assertEq(await pool.checkpointedCount(), 1n, 'checkpointedCount=1');
-  });
-
-  // ---------------------------- chat imports note from deep link ----------
-
-  await step('Dapp B — chat imports note', async () => {
-    const parsed = parseDeepLink(importLink);
-    assertEq(parsed.kind === 'import' ? 1n : 0n, 1n, 'kind=import');
-    const n = parsed.note;
-    assertEq(n.value, value, 'imported value');
-    assertEq(n.ownerPkHash, buyerKp.ownerPkHash, 'imported pkHash');
-    assertEq(n.sk, buyerKp.sk, 'imported sk');
-  });
-
-  // ----------------------------- assign: chat proves, relay submits -------
-
-  const communityId = 0xa11cen;
-  const communityKp = await generateKeypair();
-  const destValue = 250n;
-  const changeValue = value - destValue;
-  const destRandomness = randomFieldElement();
-  const changeRandomness = randomFieldElement();
-  const redeemerHash = await redeemerHashFromId(communityId);
-
-  let assignBundleLink;
-  let cmDest, cmChange, nullifier1;
-  await step('Dapp B (chat) — prove assign, no signer', async () => {
-    const entry = buyerStore.active('self')[0];
-    const { pathElements, pathIndices, root } = await mirror.proof(entry.leafIndex);
-    nullifier1 = await deriveNullifier(entry.sk, BigInt(entry.commitment));
-
-    cmDest = await deriveCommitment({
-      value: destValue,
-      expiryEpoch: entry.expiryEpoch,
-      ownerPkHash: communityKp.ownerPkHash,
-      randomness: destRandomness,
-      assigned: 1n,
-      redeemerHash,
-    });
-    cmChange = await deriveCommitment({
-      value: changeValue,
-      expiryEpoch: entry.expiryEpoch,
-      ownerPkHash: entry.ownerPkHash,
-      randomness: changeRandomness,
-      assigned: 0n,
-      redeemerHash: 0n,
-    });
-
     const { proofFlat } = await proveAssign({
-      sk: entry.sk,
-      value: entry.value,
-      expiryEpoch: entry.expiryEpoch,
-      randomness: entry.randomness,
-      pathElements,
-      pathIndices,
-      destValue,
-      destOwnerPkHash: communityKp.ownerPkHash,
-      destRandomness,
-      redeemerId: communityId,
-      changeRandomness,
-      root,
-      nullifier: nullifier1,
-      expiryEpochPub: entry.expiryEpoch,
-      cmDest,
-      cmChange,
+      sk: src.sk, value: src.value, expiryEpoch: src.expiryEpoch,
+      randomness: src.randomness, pathElements, pathIndices,
+      destValue: dstValue, destOwnerPkHash: dstKp.ownerPkHash, destRandomness,
+      redeemerId: dstCid, changeRandomness, root,
+      nullifier, expiryEpochPub: src.expiryEpoch, cmDest, cmChange,
     });
-
-    assignBundleLink = buildAssignLink('https://relay.example/', {
-      nullifier: nullifier1,
-      expiryEpoch: Number(entry.expiryEpoch),
-      cmDest,
-      cmChange,
-      root,
-      proof: proofFlat,
-    });
-  });
-
-  await step('Dapp C (relay) — submit assign tx', async () => {
-    const parsed = parseDeepLink(assignBundleLink);
-    assertEq(parsed.kind === 'assign' ? 1n : 0n, 1n, 'kind=assign');
-    const b = parsed.bundle;
-    const { pA, pB, pC } = unpackProof(b.proof);
-    const txr = await wrap('assign', relayAddr, () =>
-      pool.connect(relay).assign(
-        b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC, callOpts,
+    const { pA, pB, pC } = unpackProof(proofFlat);
+    const txr = await wrap(`assign ${label}`, submitterAddr, () =>
+      pool.connect(submitter).assign(
+        nullifier, src.expiryEpoch, cmDest, cmChange, root, pA, pB, pC, callOpts,
       ),
     );
-    assertOk(txr.status === 1, 'assign tx status');
-
-    // Both new commitments land in the stream. They'll be folded into the
-    // tree by the next drainCheckpoints() pass; record their eventual leaf
-    // positions now (Assigned event includes destLeafIndex / changeLeafIndex
-    // = the stream positions).
     const ev = txr.logs
       .map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
       .find((p) => p && p.name === 'Assigned');
-    assertOk(ev, 'Assigned event');
-    const destLeafIndex = Number(ev.args.destLeafIndex);
-    const changeLeafIndex = Number(ev.args.changeLeafIndex);
-    pendingStream.push(b.cmDest, b.cmChange);
+    assertOk(ev, `Assigned event (${label})`);
+    pendingStream.push(cmDest, cmChange);
+    return {
+      destEntry: {
+        commitment: cmDest.toString(), leafIndex: Number(ev.args.destLeafIndex),
+        sk: dstKp.sk, ownerPkHash: dstKp.ownerPkHash, randomness: destRandomness,
+        value: dstValue, expiryEpoch: src.expiryEpoch, assigned: 1,
+        redeemerHash: dstRedeemerHash, scope: 'self', spent: false,
+      },
+      changeEntry: {
+        commitment: cmChange.toString(), leafIndex: Number(ev.args.changeLeafIndex),
+        sk: src.sk, ownerPkHash: src.ownerPkHash, randomness: changeRandomness,
+        value: changeValue, expiryEpoch: src.expiryEpoch, assigned: 0,
+        redeemerHash: 0n, scope: 'self', spent: false,
+      },
+    };
+  }
 
-    // Update the chat store: mark old note spent, add change to buyer.
-    buyerStore.markSpent(cm.toString());
-    buyerStore.add({
-      commitment: cmChange.toString(), leafIndex: changeLeafIndex,
-      sk: buyerKp.sk, ownerPkHash: buyerKp.ownerPkHash, randomness: changeRandomness,
-      value: changeValue, expiryEpoch, assigned: 0, redeemerHash: 0n,
-      scope: 'self', spent: false,
+  async function doRedeem(src, cid, redeemValue, relayWallet, relayAddr, label) {
+    const { pathElements, pathIndices, root } = await mirror.proof(src.leafIndex);
+    const nullifier      = await deriveNullifier(src.sk, BigInt(src.commitment));
+    const changeRandomness = randomFieldElement();
+    const changeValue      = src.value - redeemValue;
+    const cmChange = await deriveCommitment({
+      value: changeValue, expiryEpoch: src.expiryEpoch,
+      ownerPkHash: src.ownerPkHash, randomness: changeRandomness,
+      assigned: 1n, redeemerHash: src.redeemerHash,
     });
-    communityStore.add({
-      commitment: cmDest.toString(), leafIndex: destLeafIndex,
-      sk: communityKp.sk, ownerPkHash: communityKp.ownerPkHash, randomness: destRandomness,
-      value: destValue, expiryEpoch, assigned: 1, redeemerHash,
-      scope: 'self', spent: false,
-    });
-  });
-
-  await step('checkpoint after assign', async () => {
-    await drainCheckpoints();
-    assertEq(await pool.checkpointedCount(), 3n, 'checkpointedCount=3');
-  });
-
-  await step('double-spend assign reverts', async () => {
-    const parsed = parseDeepLink(assignBundleLink);
-    const b = parsed.bundle;
-    const { pA, pB, pC } = unpackProof(b.proof);
-    let threw = false;
-    try {
-      await (
-        await pool
-          .connect(relay)
-          .assign(b.nullifier, b.expiryEpoch, b.cmDest, b.cmChange, b.root, pA, pB, pC, callOpts)
-      ).wait();
-    } catch (e) {
-      // Hardhat surfaces the explicit "pool/nullifier" revert string;
-      // pallet-revive/eth-rpc collapses it to a generic CALL_EXCEPTION
-      // ("transaction execution reverted") without the reason. Accept both.
-      threw = /pool\/nullifier|execution reverted/.test(e.message);
-    }
-    assertOk(threw, 'expected double-spend revert');
-    // The eth_estimateGas pre-flight on the failed tx burned a phantom nonce
-    // in NonceManager's local counter; resync from chain so the next tx
-    // doesn't fall behind.
-    relay.reset();
-  });
-
-  // ---------------------------- redeem: community proves, relay submits ---
-
-  const redeemValue = 100n;
-  const redeemChangeValue = destValue - redeemValue;
-  const redeemChangeRandomness = randomFieldElement();
-  let redeemBundleLink;
-  let cmRedeemChange;
-  let nullifier2;
-
-  await step('Dapp B (community) — prove redeem', async () => {
-    const entry = communityStore.active('self')[0];
-    // Recompute path for the dest leaf — mirror tree has all leaves so far.
-    // dest was inserted right after the create, before the change leaf.
-    const { pathElements, pathIndices, root } = await mirror.proof(entry.leafIndex);
-    nullifier2 = await deriveNullifier(entry.sk, BigInt(entry.commitment));
-
-    cmRedeemChange = await deriveCommitment({
-      value: redeemChangeValue,
-      expiryEpoch: entry.expiryEpoch,
-      ownerPkHash: entry.ownerPkHash,
-      randomness: redeemChangeRandomness,
-      assigned: 1n,
-      redeemerHash,
-    });
-
     const operatorId = BigInt(relayAddr);
-
     const { proofFlat } = await proveRedeem({
-      sk: entry.sk,
-      value: entry.value,
-      expiryEpoch: entry.expiryEpoch,
-      randomness: entry.randomness,
-      redeemerHash,
-      redeemerId: communityId,
-      pathElements,
-      pathIndices,
-      changeRandomness: redeemChangeRandomness,
-      changeValue: redeemChangeValue,
-      root,
-      nullifier: nullifier2,
-      expiryEpochPub: entry.expiryEpoch,
-      redeemValue,
-      cmChange: cmRedeemChange,
-      operatorId,
+      sk: src.sk, value: src.value, expiryEpoch: src.expiryEpoch,
+      randomness: src.randomness, redeemerHash: src.redeemerHash,
+      redeemerId: cid, pathElements, pathIndices,
+      changeRandomness, changeValue, root,
+      nullifier, expiryEpochPub: src.expiryEpoch,
+      redeemValue, cmChange, operatorId,
     });
-
-    redeemBundleLink = buildRedeemLink('https://relay.example/', {
-      nullifier: nullifier2,
-      expiryEpoch: Number(entry.expiryEpoch),
-      redeemValue,
-      cmChange: cmRedeemChange,
-      root,
-      operatorId,
-      proof: proofFlat,
-    });
-  });
-
-  await step('Dapp C (relay) — submit redeem tx', async () => {
-    const parsed = parseDeepLink(redeemBundleLink);
-    assertEq(parsed.kind === 'redeem' ? 1n : 0n, 1n, 'kind=redeem');
-    const b = parsed.bundle;
-    const { pA, pB, pC } = unpackProof(b.proof);
-    const txr = await wrap('redeem', relayAddr, () =>
-      pool.connect(relay).redeem(
-        b.nullifier, b.expiryEpoch, b.redeemValue, b.cmChange, b.root,
-        b.operatorId, pA, pB, pC, callOpts,
+    const { pA, pB, pC } = unpackProof(proofFlat);
+    const txr = await wrap(`redeem ${label}`, relayAddr, () =>
+      pool.connect(relayWallet).redeem(
+        nullifier, src.expiryEpoch, redeemValue, cmChange, root, operatorId,
+        pA, pB, pC, callOpts,
       ),
     );
-    assertOk(txr.status === 1, 'redeem tx status');
+    const ev = txr.logs
+      .map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
+      .find((p) => p && p.name === 'Redeemed');
+    assertOk(ev, `Redeemed event (${label})`);
+    pendingStream.push(cmChange);
+    return {
+      commitment: cmChange.toString(), leafIndex: Number(ev.args.changeLeafIndex),
+      sk: src.sk, ownerPkHash: src.ownerPkHash, randomness: changeRandomness,
+      value: changeValue, expiryEpoch: src.expiryEpoch, assigned: 1,
+      redeemerHash: src.redeemerHash, scope: 'self', spent: false,
+    };
+  }
 
-    // cmChange goes into the stream; the next drainCheckpoints() will fold
-    // it into the tree. Not necessary for this test (no further spends),
-    // but flush it anyway to exercise the post-redeem checkpoint path.
-    pendingStream.push(b.cmChange);
-
-    assertEq(await pool.credit(relayAddr), redeemValue, 'credit balance');
-    assertEq(await pool.spent(Number(expiryEpoch)), redeemValue, 'spent[epoch]');
+  // -------- buy phase --------
+  let userANote, userBNote;
+  await step('Dapp A — userA buys 100 tUSDC', async () => {
+    try {
+      userANote = await doBuy(userAKp, buyerA, buyerAAddr, 'userA');
+      userAStore.add(userANote);
+    } catch (e) {
+      // First on-chain tx — abort cascade if it fails (e.g. stale PVM
+      // verifier on chopsticks). Rest of the steps depend on it.
+      e.abortRest = true;
+      e.abortReason = 'first buyAndCreate failed — see test/e2e/deploy.mjs::assertPvmArtifactsFresh()';
+      throw e;
+    }
   });
-
-  await step('checkpoint after redeem', async () => {
+  await step('Dapp A — userB buys 100 tUSDC', async () => {
+    userBNote = await doBuy(userBKp, buyerB, buyerBAddr, 'userB');
+    userBStore.add(userBNote);
+  });
+  await step('checkpoint after buys (drain 2)', async () => {
     await drainCheckpoints();
-    assertEq(await pool.checkpointedCount(), 4n, 'checkpointedCount=4');
+    assertEq(await pool.checkpointedCount(), 2n, 'checkpointedCount=2');
   });
 
-  await step('Dapp C — operator withdraw', async () => {
-    const before = await tUsdc.balanceOf(relayAddr);
-    await wrap('withdraw', relayAddr, () =>
-      pool.connect(relay).withdraw(redeemValue, callOpts),
+  // -------- assign round 1: each user → commA, value 20 --------
+  let userAChange, userBChange;
+  await step('userA → commA assign 20', async () => {
+    const r = await doAssign(userANote, communityAKp, communityAId, redeemerHashA,
+      TO_COMM_A, relayA, relayAAddr, 'userA→commA');
+    userAStore.markSpent(userANote.commitment);
+    userAStore.add(r.changeEntry);
+    communityAStore.add(r.destEntry);
+    userAChange = r.changeEntry;
+  });
+  await step('userB → commA assign 20', async () => {
+    const r = await doAssign(userBNote, communityAKp, communityAId, redeemerHashA,
+      TO_COMM_A, relayA, relayAAddr, 'userB→commA');
+    userBStore.markSpent(userBNote.commitment);
+    userBStore.add(r.changeEntry);
+    communityAStore.add(r.destEntry);
+    userBChange = r.changeEntry;
+  });
+  await step('checkpoint after commA assigns (drain 4)', async () => {
+    await drainCheckpoints();
+    assertEq(await pool.checkpointedCount(), 6n, 'checkpointedCount=6');
+  });
+
+  // -------- assign round 2: each user → commB, value 30 (from change) --------
+  await step('userA → commB assign 30 (from change)', async () => {
+    const r = await doAssign(userAChange, communityBKp, communityBId, redeemerHashB,
+      TO_COMM_B, relayA, relayAAddr, 'userA→commB');
+    userAStore.markSpent(userAChange.commitment);
+    userAStore.add(r.changeEntry);
+    communityBStore.add(r.destEntry);
+  });
+  await step('userB → commB assign 30 (from change)', async () => {
+    const r = await doAssign(userBChange, communityBKp, communityBId, redeemerHashB,
+      TO_COMM_B, relayA, relayAAddr, 'userB→commB');
+    userBStore.markSpent(userBChange.commitment);
+    userBStore.add(r.changeEntry);
+    communityBStore.add(r.destEntry);
+  });
+  await step('checkpoint after commB assigns (drain 4)', async () => {
+    await drainCheckpoints();
+    assertEq(await pool.checkpointedCount(), 10n, 'checkpointedCount=10');
+  });
+
+  // -------- redeem phase: each community → 5 to relayA, 8 to relayB --------
+  // Each community holds two dest notes (one from each user). The two
+  // redeems per community spend distinct source notes, so the proof
+  // exercises both leaf positions.
+  await step('commA → relayA redeem 5', async () => {
+    const entry = communityAStore.active('self')[0];
+    await doRedeem(entry, communityAId, REDEEM_TO_RA, relayA, relayAAddr, 'commA→relayA');
+    communityAStore.markSpent(entry.commitment);
+  });
+  await step('commA → relayB redeem 8', async () => {
+    const entry = communityAStore.active('self')[0];
+    await doRedeem(entry, communityAId, REDEEM_TO_RB, relayB, relayBAddr, 'commA→relayB');
+    communityAStore.markSpent(entry.commitment);
+  });
+  await step('commB → relayA redeem 5', async () => {
+    const entry = communityBStore.active('self')[0];
+    await doRedeem(entry, communityBId, REDEEM_TO_RA, relayA, relayAAddr, 'commB→relayA');
+    communityBStore.markSpent(entry.commitment);
+  });
+  await step('commB → relayB redeem 8', async () => {
+    const entry = communityBStore.active('self')[0];
+    await doRedeem(entry, communityBId, REDEEM_TO_RB, relayB, relayBAddr, 'commB→relayB');
+    communityBStore.markSpent(entry.commitment);
+  });
+  await step('checkpoint after redeems (drain 4)', async () => {
+    await drainCheckpoints();
+    assertEq(await pool.checkpointedCount(), 14n, 'checkpointedCount=14');
+  });
+
+  // -------- on-chain credit + per-relay withdraw --------
+  await step('credit balances are 10 (relayA) and 16 (relayB)', async () => {
+    assertEq(await pool.credit(relayAAddr), REDEEM_TO_RA * 2n, 'relayA credit');
+    assertEq(await pool.credit(relayBAddr), REDEEM_TO_RB * 2n, 'relayB credit');
+  });
+  await step('relayA withdraws 10', async () => {
+    const before = await tUsdc.balanceOf(relayAAddr);
+    await wrap('withdraw relayA', relayAAddr, () =>
+      pool.connect(relayA).withdraw(REDEEM_TO_RA * 2n, callOpts),
     );
-    const after = await tUsdc.balanceOf(relayAddr);
-    assertEq(after - before, redeemValue, 'relay tUSDC delta');
-    assertEq(await pool.credit(relayAddr), 0n, 'credit drained');
+    const after = await tUsdc.balanceOf(relayAAddr);
+    assertEq(after - before, REDEEM_TO_RA * 2n, 'relayA tUSDC delta');
+    assertEq(await pool.credit(relayAAddr), 0n, 'relayA credit drained');
+  });
+  await step('relayB withdraws 16', async () => {
+    const before = await tUsdc.balanceOf(relayBAddr);
+    await wrap('withdraw relayB', relayBAddr, () =>
+      pool.connect(relayB).withdraw(REDEEM_TO_RB * 2n, callOpts),
+    );
+    const after = await tUsdc.balanceOf(relayBAddr);
+    assertEq(after - before, REDEEM_TO_RB * 2n, 'relayB tUSDC delta');
+    assertEq(await pool.credit(relayBAddr), 0n, 'relayB credit drained');
   });
 
   await step('solvency invariant holds', async () => {
-    const deposited = await pool.deposited();
-    const withdrawn = await pool.withdrawn();
-    const credits = await pool.credit(relayAddr);
-    const mintedE = await pool.minted(Number(expiryEpoch));
-    const spentE = await pool.spent(Number(expiryEpoch));
+    const deposited  = await pool.deposited();
+    const withdrawn  = await pool.withdrawn();
+    const credits    = (await pool.credit(relayAAddr)) + (await pool.credit(relayBAddr));
+    const mintedE    = await pool.minted(Number(expiryEpoch));
+    const spentE     = await pool.spent(Number(expiryEpoch));
     const reclaimedE = await pool.reclaimed(Number(expiryEpoch));
-    const unspent = mintedE - spentE - reclaimedE;
+    const unspent    = mintedE - spentE - reclaimedE;
     assertEq(unspent + credits, deposited - withdrawn, 'solvency');
   });
 
@@ -626,8 +599,10 @@ async function main() {
 
   // Summaries
   declareSubjects({
-    [buyerAddr.toLowerCase()]: 'buyer',
-    [relayAddr.toLowerCase()]: 'paymaster + operator',
+    [buyerAAddr.toLowerCase()]: 'userA',
+    [buyerBAddr.toLowerCase()]: 'userB',
+    [relayAAddr.toLowerCase()]: 'relayA',
+    [relayBAddr.toLowerCase()]: 'relayB',
   });
   if (measureFees) {
     feeReport();
