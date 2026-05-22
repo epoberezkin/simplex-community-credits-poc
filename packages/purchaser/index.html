@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Community Credits — Purchaser</title>
+    <title>Purchaser</title>
     <style>
       body { font-family: system-ui, sans-serif; max-width: 480px; margin: 1rem auto; padding: 0 1rem; }
       h1 { font-size: 1.2rem; }
@@ -25,11 +25,9 @@
     <h1>Dapp A — Purchaser</h1>
     <p class="mut">
       Buy a privacy-preserving voucher with tUSDC. Per voucher we generate
-      a fresh secret key (kept off-chain), prove the create circuit in a
-      worker, approve the tUSDC transfer, and call
+      a fresh secret key (kept off-chain), prove the create circuit, approve the tUSDC transfer, and call
       <code>buyAndCreate</code> on the pool. The dapp emits a deep link
-      to the chat dapp carrying the note — that's how you "hold" the
-      voucher.
+      to the chat dapp carrying the note — that's how you import the voucher to the chat app.
     </p>
     <p class="mut">
       This is the only dapp that needs the buyer's wallet — assigns and

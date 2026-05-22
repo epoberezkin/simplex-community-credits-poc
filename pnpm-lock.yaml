@@ -191,9 +191,6 @@ importers:
       '@community-credits/core':
         specifier: workspace:*
         version: link:../packages/core
-      '@polkadot/api':
-        specifier: ^14.0.0
-        version: 14.3.1
       contracts:
         specifier: workspace:*
         version: link:../contracts
