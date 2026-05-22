@@ -34,7 +34,12 @@
 
     <section id="viewMyNotes" class="card">
       <h2 style="font-size:1rem;margin:0">My vouchers</h2>
-      <p class="mut">Held in this profile. Import via deep link or QR scan.</p>
+      <p class="mut">
+        Privacy-preserving vouchers you hold. The chat dapp never touches
+        your wallet — it stores spend keys locally and produces zero-
+        knowledge proofs in a worker. Import a voucher via the deep link
+        you got from the purchaser dapp, then spend it below.
+      </p>
       <button id="scanBtn">📷 Scan QR</button>
       <video id="scanVideo" hidden style="width:100%;border-radius:8px;"></video>
       <div id="notesList"></div>
@@ -42,19 +47,38 @@
 
     <section id="viewAssign" class="card" hidden>
       <h2 style="font-size:1rem;margin:0">Assign to community</h2>
-      <label class="mut">Note <select id="assignNote"></select></label>
-      <label class="mut">Community id (hex) <input id="communityId" placeholder="0xa11ce" /></label>
-      <label class="mut">Community owner pkHash (hex)
-        <input id="destOwnerPk" placeholder="hex pkHash from the community admin" />
+      <p class="mut">
+        Transfer part (or all) of a voucher to a community. You prove
+        consumption of the old note and emit two new commitments: one for
+        the community (they can later redeem it for tUSDC) and one for
+        yourself (your change). The on-chain submission goes through the
+        paymaster relay — see the relay dapp.
+      </p>
+      <label>Note
+        <select id="assignNote"></select>
+        <span class="mut">Pick the voucher you want to spend.</span>
       </label>
-      <label class="mut">Dest value <input id="destValue" type="number" value="100" /></label>
+      <label>Community
+        <select id="assignCommunity"></select>
+        <span class="mut">
+          Demo communities have deterministic owner keys so user + admin
+          agree without coordination. Real communities would publish their
+          pkHash via their own onboarding.
+        </span>
+      </label>
+      <label>Dest value
+        <input id="destValue" type="number" value="100" />
+        <span class="mut">How much of the note goes to the community. The rest becomes a change note you keep.</span>
+      </label>
       <button id="proveAssignBtn">Prove + open in relay</button>
       <p id="assignStatus" class="mut"></p>
       <div id="assignResult" hidden>
         <canvas id="assignQR"></canvas>
         <a id="assignLink" target="_blank">Open relay link →</a>
         <p class="mut" style="margin-top:0.5rem">
-          Send this to the operator (will appear in their chat admin view):
+          The community-import link below is what an admin would receive
+          via SimpleX. In this demo you open it yourself in the admin tab
+          to play the operator role:
           <br /><a id="communityImportLink" target="_blank">Community-import link →</a>
         </p>
       </div>
@@ -62,13 +86,35 @@
 
     <section id="viewAdmin" class="card" hidden>
       <h2 style="font-size:1rem;margin:0">Community inbox</h2>
-      <p class="mut">Received notes for this community admin profile.</p>
+      <p class="mut">
+        Notes assigned to this community by users. Each note is spendable
+        once it's been checkpointed on chain (you'll see "pending" until
+        then). Redeem turns a note into tUSDC credit on the chosen
+        operator — see the relay dapp.
+      </p>
+      <p class="mut" id="adminPkRow" hidden>
+        Your community's pkHash (for reference; the user dapp auto-derives it):
+        <br /><code id="adminPk" style="word-break:break-all;font-size:0.8rem"></code>
+      </p>
       <div id="adminNotes"></div>
 
       <h3 style="font-size:0.95rem">Redeem</h3>
-      <label class="mut">Note <select id="redeemNote"></select></label>
-      <label class="mut">Operator address (0x…) <input id="operatorAddr" /></label>
-      <label class="mut">Redeem value <input id="redeemValue" type="number" value="50" /></label>
+      <label>Note
+        <select id="redeemNote"></select>
+        <span class="mut">Which received note to cash out.</span>
+      </label>
+      <label>Operator
+        <select id="redeemOperator"></select>
+        <span class="mut">
+          The relay that will submit your redeem tx and earn the credited
+          tUSDC (they later forward it to you off-chain, or run their own
+          settlement model).
+        </span>
+      </label>
+      <label>Redeem value
+        <input id="redeemValue" type="number" value="100" />
+        <span class="mut">Must equal the note's full value (no change on redeem).</span>
+      </label>
       <button id="proveRedeemBtn">Prove + open in relay</button>
       <p id="redeemStatus" class="mut"></p>
       <div id="redeemResult" hidden>

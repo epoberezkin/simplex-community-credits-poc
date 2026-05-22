@@ -28,7 +28,12 @@ esac
 echo "[chopsticks] using ${CFG}"
 
 echo "[chopsticks] starting on ws://127.0.0.1:${CHOPSTICKS_PORT}"
-npx @acala-network/chopsticks \
+# Pin 1.3.1: 1.4.x (released May 2026) has a wasm-runtime regression that
+# traps `unreachable` after ~330 Metadata_metadata calls when running a
+# forked Polkadot Asset Hub. Override with CHOPSTICKS_VERSION=latest if
+# you want to test a newer release.
+CHOPSTICKS_VERSION="${CHOPSTICKS_VERSION:-1.3.1}"
+npx -y "@acala-network/chopsticks@${CHOPSTICKS_VERSION}" \
   --config "${CFG}" \
   --port "${CHOPSTICKS_PORT}" \
   > chopsticks/chopsticks.log 2>&1 &

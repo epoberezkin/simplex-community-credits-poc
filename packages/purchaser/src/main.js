@@ -32,36 +32,72 @@ const ERC20_ABI = [
 
 let signer; // ethers signer (BrowserProvider-bound, or local Wallet in demo mode)
 let userAddr;
+let provider;
+let usdc;
 
 const $ = (id) => document.getElementById(id);
 
+// DOT and tUSDC balance, polled every 3s once a signer is wired up.
+function fmtDot(wei) { return (Number(wei) / 1e10).toFixed(4); }
+function fmtUsdc(units) { return units.toString(); }
+async function refreshBalances() {
+  if (!userAddr || !provider) return;
+  try {
+    const [dot, u] = await Promise.all([
+      provider.getBalance(userAddr),
+      usdc.balanceOf(userAddr),
+    ]);
+    $('balDot').textContent = fmtDot(dot);
+    $('balUsdc').textContent = fmtUsdc(u);
+    $('balances').hidden = false;
+  } catch { /* RPC blip; try again next tick */ }
+}
+setInterval(refreshBalances, 3_000);
+
 // Demo / Playwright path: ?demoKey=<0x-prefixed-privkey> skips EIP-6963
-// and uses a local ethers.Wallet against cfg.ethRpcUrl. Never use on a
-// real chain — the key is visible in the URL bar.
-function demoKeyFromUrl() {
-  const u = new URL(location.href);
-  const k = u.searchParams.get('demoKey');
+// and uses a local ethers.Wallet against cfg.ethRpcUrl. URL is the only
+// source of truth — reload preserves it (browser keeps the query), close
+// + reopen forgets. The URL with the key IS the bookmark.
+const TEST_BUYER_KEY = ethers.keccak256(
+  ethers.toUtf8Bytes('simplex-community-credits-poc-buyer-v1'),
+);
+
+function getDemoKey() {
+  const k = new URL(location.href).searchParams.get('demoKey');
   return k && /^0x[0-9a-fA-F]{64}$/.test(k) ? k : null;
 }
 
 async function bootDemoMode(key) {
-  const provider = new ethers.JsonRpcProvider(cfg.ethRpcUrl);
+  provider = new ethers.JsonRpcProvider(cfg.ethRpcUrl);
   signer = new ethers.NonceManager(new ethers.Wallet(key, provider));
   userAddr = await signer.getAddress();
+  usdc = new ethers.Contract(cfg.stablecoinAddress, ERC20_ABI, provider);
   $('wallets').innerHTML =
     '<p class="err" style="background:#fee;padding:0.4rem;border-radius:4px">' +
-    '⚠ Demo mode — using URL-supplied key. Do NOT use on a real chain.</p>';
+    '⚠ Demo mode — using local key. Do NOT use on a real chain.</p>';
   $('walletStatus').textContent = `demo • ${userAddr}`;
   $('walletStatus').className = 'ok';
   $('buy').hidden = false;
+  await refreshBalances();
 }
 
 async function renderWallets() {
   const list = await discoverProviders();
   const host = $('wallets');
   host.innerHTML = '';
+  // Test-key shortcut — always available, so a user without MetaMask
+  // can still drive the demo.
+  const demoBtn = document.createElement('button');
+  demoBtn.textContent = 'Use built-in test key (demo)';
+  demoBtn.onclick = () => bootDemoMode(TEST_BUYER_KEY);
+  demoBtn.style.background = '#fee';
+  host.appendChild(demoBtn);
   if (list.length === 0) {
-    host.innerHTML = '<p class="err">No EIP-6963 wallet detected. Install MetaMask, Talisman, or SubWallet (EVM mode).</p>';
+    const p = document.createElement('p');
+    p.className = 'mut';
+    p.style.marginTop = '0.4rem';
+    p.textContent = 'No extension wallet detected. Use the test key for a local demo, or install MetaMask for a real wallet.';
+    host.appendChild(p);
     return;
   }
   for (const w of list) {
@@ -77,9 +113,12 @@ async function connect(eip1193, name) {
     userAddr = await connectEvm(eip1193, { chainIdHex: cfg.chainIdHex });
     const browser = new ethers.BrowserProvider(eip1193);
     signer = await browser.getSigner();
+    provider = browser;
+    usdc = new ethers.Contract(cfg.stablecoinAddress, ERC20_ABI, provider);
     $('walletStatus').textContent = `${name} • ${userAddr}`;
     $('walletStatus').className = 'ok';
     $('buy').hidden = false;
+    await refreshBalances();
   } catch (e) {
     $('walletStatus').textContent = `Failed: ${e.message}`;
     $('walletStatus').className = 'err';
@@ -123,6 +162,7 @@ async function buy() {
     const txr = await (await pool.buyAndCreate(cm, value, Number(expiryEpoch), pA, pB, pC)).wait();
 
     status.innerHTML = `<span class="ok">Voucher minted (tx ${txr.hash.slice(0, 10)}…)</span>`;
+    await refreshBalances();
     await showResult({
       value, expiryEpoch, ownerPkHash, randomness,
       assigned: 0, redeemerHash: 0n, sk,
@@ -145,6 +185,6 @@ async function showResult(note) {
 }
 
 $('goBuy').addEventListener('click', buy);
-const _demoKey = demoKeyFromUrl();
+const _demoKey = getDemoKey();
 if (_demoKey) await bootDemoMode(_demoKey);
 else renderWallets();

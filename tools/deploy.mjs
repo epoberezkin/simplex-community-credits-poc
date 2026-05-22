@@ -36,27 +36,69 @@ console.log(`> connected to ${ETH_RPC_URL} (chainId ${chainId} = ${chainIdHex})`
 const admin = new ethers.NonceManager(deployerWallet.connect(provider));
 const txOpts = { gasLimit: TX_GAS };
 
+// Per-step cost tracking via eth_getBalance — gives us "delta DOT spent"
+// per tx without needing a second @polkadot/api connection (which would
+// double up the metadata-query load on chopsticks and contributed to a
+// runtime wasm trap on heavy demos). eth_getBalance returns the native
+// DOT balance scaled to 18 decimals via pallet-revive's eth-rpc.
+async function getDot(addr) {
+  try {
+    return await provider.getBalance(addr);
+  } catch {
+    return null;
+  }
+}
+function fmtDot(wei) {
+  if (wei === null || wei === undefined) return '?';
+  const n = wei < 0n ? -wei : wei;
+  const sign = wei < 0n ? '-' : '';
+  return `${sign}${(Number(n) / 1e18).toFixed(6)} DOT`;
+}
+async function trackFee(label, fn) {
+  const before = await getDot(deployerWallet.address);
+  const result = await fn();
+  const after = await getDot(deployerWallet.address);
+  if (before !== null && after !== null) {
+    console.log(`  ${label.padEnd(20)} cost: ${fmtDot(before - after)}`);
+  }
+  return result;
+}
+
 console.log(`> deploying as ${deployerWallet.address}…`);
-const { tUsdc, pool, createV, assignV, redeemV, checkpointV } = await deployAll({
-  signer: admin,
-  epochSize: EPOCH_SIZE,
-  txOpts,
-});
+const totalBefore = await getDot(deployerWallet.address);
+// Chopsticks 1.3.1 (and 1.4) sometimes duplicates a tx in its own block
+// when an upstream RPC stalls and ethers retries internally. The dedup
+// suppresses the resulting duplicate step log lines.
+let _lastLog = '';
+const dedupLog = (msg) => { if (msg !== _lastLog) console.log(msg); _lastLog = msg; };
+const { tUsdc, pool, createV, assignV, redeemV, checkpointV } = await trackFee('all 6 contracts', () =>
+  deployAll({
+    signer: admin,
+    epochSize: EPOCH_SIZE,
+    txOpts,
+    log: dedupLog,
+  })
+);
 
 const tUsdcAddr = await tUsdc.getAddress();
 const poolAddr = await pool.getAddress();
-console.log(`  tUSDC                : ${tUsdcAddr}`);
-console.log(`  VoucherPool          : ${poolAddr}`);
-console.log(`  CreateVerifier       : ${await createV.getAddress()}`);
-console.log(`  AssignVerifier       : ${await assignV.getAddress()}`);
-console.log(`  RedeemVerifier       : ${await redeemV.getAddress()}`);
-console.log(`  CheckpointVerifier   : ${await checkpointV.getAddress()}`);
 
 // Mint tUSDC to the buyer + register the relay as an operator.
 console.log(`> minting ${TUSDC_MINT} tUSDC to buyer ${buyerWallet.address}…`);
-await (await tUsdc.connect(admin).mint(buyerWallet.address, TUSDC_MINT, txOpts)).wait();
+await trackFee('mint', async () => {
+  const r = await (await tUsdc.connect(admin).mint(buyerWallet.address, TUSDC_MINT, txOpts)).wait();
+  console.log(`  tx ${r.hash.slice(0, 14)}…  gas ${r.gasUsed}`);
+});
 console.log(`> registering relay ${relayWallet.address} as operator…`);
-await (await pool.connect(admin).registerOperator(relayWallet.address, txOpts)).wait();
+await trackFee('registerOperator', async () => {
+  const r = await (await pool.connect(admin).registerOperator(relayWallet.address, txOpts)).wait();
+  console.log(`  tx ${r.hash.slice(0, 14)}…  gas ${r.gasUsed}`);
+});
+
+const totalAfter = await getDot(deployerWallet.address);
+if (totalBefore !== null && totalAfter !== null) {
+  console.log(`> deployer spent total: ${fmtDot(totalBefore - totalAfter)}`);
+}
 
 // Write addresses into each dapp's public/config.json.
 const dappCfg = {
@@ -70,6 +112,12 @@ const dappCfg = {
   relayBaseUrl: process.env.RELAY_BASE_URL || 'http://localhost:5175/',
   poolAddress: poolAddr,
   stablecoinAddress: tUsdcAddr,
+  // Demo-time pre-configured operator list (so the chat dapp's redeem
+  // form is a dropdown, not free-text). Production: discovered from
+  // VoucherPool.OperatorRegistered events or a separate registry.
+  demoOperators: [
+    { name: 'demo relay', address: relayWallet.address },
+  ],
 };
 const dappDirs = ['purchaser', 'chat', 'relay'];
 for (const d of dappDirs) {

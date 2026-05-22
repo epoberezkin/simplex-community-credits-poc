@@ -41,37 +41,44 @@ function loadVerifier(name) {
   );
 }
 
-export async function deployAll({ signer, epochSize = 100, txOpts = {} }) {
+export async function deployAll({ signer, epochSize = 100, txOpts = {}, log = () => {} }) {
+  async function step(name, artFactory, ctorArgs) {
+    const t0 = Date.now();
+    const c = await artFactory.deploy(...ctorArgs, txOpts);
+    const dt = await c.deploymentTransaction()?.wait();
+    await c.waitForDeployment();
+    const addr = await c.getAddress();
+    log(`  ${name.padEnd(22)} ${addr}  (tx ${dt?.hash?.slice(0, 14)}…  gas ${dt?.gasUsed ?? '?'}, ${(Date.now() - t0) / 1000}s)`);
+    return c;
+  }
+
   const tUsdcArt = loadArtifact('TestUSDC');
-  const tUsdc = await new ethers.ContractFactory(
-    tUsdcArt.abi, tUsdcArt.bytecode, signer,
-  ).deploy(0n, txOpts);
-  await tUsdc.waitForDeployment();
+  const tUsdc = await step('TestUSDC',
+    new ethers.ContractFactory(tUsdcArt.abi, tUsdcArt.bytecode, signer), [0n]);
 
   const createArt = loadVerifier('CreateVerifier');
   const assignArt = loadVerifier('AssignVerifier');
   const redeemArt = loadVerifier('RedeemVerifier');
   const checkpointArt = loadVerifier('CheckpointVerifier');
-  const createV = await new ethers.ContractFactory(createArt.abi, createArt.bytecode, signer).deploy(txOpts);
-  await createV.waitForDeployment();
-  const assignV = await new ethers.ContractFactory(assignArt.abi, assignArt.bytecode, signer).deploy(txOpts);
-  await assignV.waitForDeployment();
-  const redeemV = await new ethers.ContractFactory(redeemArt.abi, redeemArt.bytecode, signer).deploy(txOpts);
-  await redeemV.waitForDeployment();
-  const checkpointV = await new ethers.ContractFactory(checkpointArt.abi, checkpointArt.bytecode, signer).deploy(txOpts);
-  await checkpointV.waitForDeployment();
+  const createV = await step('CreateVerifier',
+    new ethers.ContractFactory(createArt.abi, createArt.bytecode, signer), []);
+  const assignV = await step('AssignVerifier',
+    new ethers.ContractFactory(assignArt.abi, assignArt.bytecode, signer), []);
+  const redeemV = await step('RedeemVerifier',
+    new ethers.ContractFactory(redeemArt.abi, redeemArt.bytecode, signer), []);
+  const checkpointV = await step('CheckpointVerifier',
+    new ethers.ContractFactory(checkpointArt.abi, checkpointArt.bytecode, signer), []);
 
   const poolArt = loadArtifact('VoucherPool');
-  const pool = await new ethers.ContractFactory(poolArt.abi, poolArt.bytecode, signer).deploy(
-    await tUsdc.getAddress(),
-    await createV.getAddress(),
-    await assignV.getAddress(),
-    await redeemV.getAddress(),
-    await checkpointV.getAddress(),
-    epochSize,
-    txOpts,
-  );
-  await pool.waitForDeployment();
+  const pool = await step('VoucherPool',
+    new ethers.ContractFactory(poolArt.abi, poolArt.bytecode, signer), [
+      await tUsdc.getAddress(),
+      await createV.getAddress(),
+      await assignV.getAddress(),
+      await redeemV.getAddress(),
+      await checkpointV.getAddress(),
+      epochSize,
+    ]);
 
   return { tUsdc, createV, assignV, redeemV, checkpointV, pool };
 }

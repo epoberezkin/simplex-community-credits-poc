@@ -31,10 +31,19 @@ const manifest = JSON.parse(readFileSync(resolve(__dirname, 'last-deploy.json'),
 
 const watch = process.argv.includes('--watch');
 const WATCH_INTERVAL_MS = 4_000;
-const TX_GAS = process.env.TX_GAS ? BigInt(process.env.TX_GAS) : 100_000_000n;
+// Hardhat caps tx gas at ~30M; pallet-revive needs the 100M PVM-weight
+// figure. Pick by chainId from the manifest unless TX_GAS is set.
+const TX_GAS = process.env.TX_GAS
+  ? BigInt(process.env.TX_GAS)
+  : manifest.chainId === 31337 ? 15_000_000n : 100_000_000n;
 
 const provider = new ethers.JsonRpcProvider(manifest.ethRpcUrl);
-const relay = new ethers.NonceManager(relayWallet.connect(provider));
+// No NonceManager — the relay key may also be used concurrently by the
+// relay dapp (when a user submits an assign/redeem), and an in-memory
+// NonceManager would drift behind the on-chain nonce and trip
+// NONCE_EXPIRED. Plain Wallet re-queries `eth_getTransactionCount(addr,
+// 'pending')` on every send.
+const relay = relayWallet.connect(provider);
 
 const POOL_ABI = [
   'function streamCount() view returns (uint32)',
@@ -82,18 +91,34 @@ async function drainOnce(mirror) {
   let cp = Number(await pool.checkpointedCount());
   const pending = stream - cp;
   if (pending === 0) return 0;
-  console.log(`> draining ${pending} pending leaf(s) (stream=${stream} cp=${cp})…`);
+  console.log(`draining ${pending} leaf(s) (stream=${stream} cp=${cp})…`);
   for (let i = 0; i < pending; i++) {
     const cm = BigInt(await pool.streamAt(cp));
     const { input } = await buildCheckpointInput({ mirror, cm, oldCount: cp });
     const { proofFlat } = await proveCheckpoint(input);
     const { pA, pB, pC } = unpackProof(proofFlat);
-    const txr = await (
-      await pool.checkpoint(input.newRoot, input.newCount, pA, pB, pC, {
-        gasLimit: TX_GAS,
-      })
-    ).wait();
-    console.log(`  cp #${cp + 1} ok  (gas ${txr.gasUsed}  hash ${txr.hash.slice(0, 14)}…)`);
+    // Retry once on NONCE_EXPIRED — the relay key may also be used
+    // concurrently by the relay dapp, so two submissions can pick the
+    // same `pending` nonce in a tight window.
+    let attempts = 0;
+    while (true) {
+      try {
+        const txr = await (
+          await pool.checkpoint(input.newRoot, input.newCount, pA, pB, pC, {
+            gasLimit: TX_GAS,
+          })
+        ).wait();
+        console.log(`cp #${cp + 1} ok (gas ${txr.gasUsed}, ${txr.hash.slice(0, 14)}…)`);
+        break;
+      } catch (e) {
+        if (++attempts > 3) throw e;
+        if (e.code === 'NONCE_EXPIRED' || /nonce/i.test(e.shortMessage || '')) {
+          await sleep(500);
+          continue;
+        }
+        throw e;
+      }
+    }
     cp++;
   }
   return pending;
@@ -101,9 +126,17 @@ async function drainOnce(mirror) {
 
 const mirror = await rebuildMirror();
 do {
-  const n = await drainOnce(mirror);
-  if (!watch) break;
-  if (n === 0) await sleep(WATCH_INTERVAL_MS);
+  try {
+    const n = await drainOnce(mirror);
+    if (!watch) break;
+    if (n === 0) await sleep(WATCH_INTERVAL_MS);
+  } catch (e) {
+    // In watch mode a transient failure (RPC blip, nonce race, etc.)
+    // shouldn't kill the watcher. Log and try again next tick.
+    if (!watch) throw e;
+    console.error(`error: ${e.shortMessage || e.message}; retry in ${WATCH_INTERVAL_MS / 1000}s`);
+    await sleep(WATCH_INTERVAL_MS);
+  }
 } while (true);
 console.log('done.');
 process.exit(0);

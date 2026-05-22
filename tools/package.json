@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "deploy": "node deploy.mjs",
-    "checkpoint": "node checkpoint.mjs"
+    "checkpoint": "node checkpoint.mjs",
+    "demo": "node demo.mjs"
   },
   "dependencies": {
     "@community-credits/core": "workspace:*",

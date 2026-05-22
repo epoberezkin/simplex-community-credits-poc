@@ -23,12 +23,30 @@
   </head>
   <body>
     <h1>Dapp A — Purchaser</h1>
-    <p class="mut">Buy a community-credits voucher with tUSDC. Generates a per-voucher key, proves <code>create</code>, signs <code>approve</code> + <code>buyAndCreate</code>.</p>
+    <p class="mut">
+      Buy a privacy-preserving voucher with tUSDC. Per voucher we generate
+      a fresh secret key (kept off-chain), prove the create circuit in a
+      worker, approve the tUSDC transfer, and call
+      <code>buyAndCreate</code> on the pool. The dapp emits a deep link
+      to the chat dapp carrying the note — that's how you "hold" the
+      voucher.
+    </p>
+    <p class="mut">
+      This is the only dapp that needs the buyer's wallet — assigns and
+      redeems route through the relay. In demo mode (URL has
+      <code>?demoKey=…</code>) a local key is used; otherwise you connect
+      a real EIP-6963 wallet (MetaMask).
+    </p>
 
     <section id="connect" class="card">
       <h2 style="font-size:1rem">Wallet</h2>
       <div id="wallets"></div>
       <p id="walletStatus" class="mut">Not connected</p>
+      <p id="balances" class="mut" hidden>
+        DOT: <strong id="balDot">—</strong>
+        &nbsp;·&nbsp;
+        tUSDC: <strong id="balUsdc">—</strong>
+      </p>
     </section>
 
     <section id="buy" class="card" hidden>

@@ -19,16 +19,39 @@
   </head>
   <body>
     <h1 style="font-size:1.2rem">Dapp C — Relay Operator</h1>
+    <p class="mut">
+      You are the <strong>paymaster relay</strong>. Users and community
+      admins prove transactions in their chat dapp (no signer) and hand
+      you the proof. You sign + submit the on-chain tx, paying DOT for
+      gas. Redeems credit the operator with tUSDC, which is how the
+      relay covers its costs.
+    </p>
+    <p class="mut">
+      In a real deployment this would all be automated — relays would
+      auto-pull pending proofs from their users via SimpleX and submit
+      without any UI. Here you click <strong>Submit</strong> manually so
+      you can see what's happening.
+    </p>
 
     <section id="connect" class="card">
       <h2 style="font-size:1rem;margin:0">Wallet</h2>
+      <p class="mut">
+        In demo mode (URL has <code>?demoKey=…</code>) a local key is
+        used. Otherwise connect any EIP-6963 wallet (MetaMask, etc.) —
+        you'll need the configured chain registered and some DOT for gas.
+      </p>
       <div id="wallets"></div>
       <p id="walletStatus" class="mut">Not connected</p>
     </section>
 
     <section id="queue" class="card" hidden>
-      <h2 style="font-size:1rem;margin:0">Queue</h2>
-      <p class="mut">Paste an <code>?assign=…</code> or <code>?redeem=…</code> URL, scan a QR, or open a deep link.</p>
+      <h2 style="font-size:1rem;margin:0">Pending submissions</h2>
+      <p class="mut">
+        Each entry is a fully proved assign or redeem ready to land on
+        chain. You don't see the underlying note material — only enough
+        to submit. Paste a deep link from chat, scan a QR, or open the
+        link directly (preserves your <code>?demoKey=…</code>).
+      </p>
       <input id="pasteUrl" placeholder="Paste relay deep link…" />
       <button id="pasteBtn">Add to queue</button>
       <button id="scanBtn">📷 Scan QR</button>
@@ -37,9 +60,21 @@
     </section>
 
     <section id="credit" class="card" hidden>
-      <h2 style="font-size:1rem;margin:0">Credit + withdraw</h2>
-      <p>Credit balance: <strong id="creditBal">—</strong> tUSDC</p>
-      <button id="withdrawBtn">Withdraw all</button>
+      <h2 style="font-size:1rem;margin:0">Balances</h2>
+      <p class="mut">
+        <strong>DOT</strong> = your gas balance (decreases when you submit).
+        <strong>tUSDC</strong> = your free balance (increases on withdraw).
+        <strong>Credit</strong> = tUSDC the pool owes you from redeems you
+        relayed; click withdraw to settle.
+      </p>
+      <p>
+        DOT: <strong id="balDot">—</strong>
+        &nbsp;·&nbsp;
+        tUSDC: <strong id="balUsdc">—</strong>
+        &nbsp;·&nbsp;
+        Credit (claimable): <strong id="creditBal">—</strong> tUSDC
+      </p>
+      <button id="withdrawBtn">Withdraw all credit</button>
       <p id="withdrawStatus" class="mut"></p>
     </section>
 

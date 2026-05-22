@@ -16,15 +16,10 @@
 
 import { test, expect } from '@playwright/test';
 import { ethers } from 'ethers';
-import {
-  randomFieldElement,
-  deriveOwnerPkHash,
-} from '@community-credits/core';
 import { buyerWallet, relayWallet } from '../../../tools/keys.mjs';
 import {
   readDeployManifest,
   runCheckpointer,
-  seedCommunitySk,
 } from '../support/runtime.mjs';
 
 const PURCHASER_URL = 'http://localhost:5173';
@@ -45,10 +40,6 @@ test('full voucher flow across all three dapps', async ({ browser }) => {
   const provider = new ethers.JsonRpcProvider(manifest.ethRpcUrl);
   const pool = new ethers.Contract(manifest.poolAddress, POOL_ABI, provider);
   const tUsdc = new ethers.Contract(manifest.tUsdcAddress, ERC20_ABI, provider);
-
-  // -- precompute the admin's (sk, pkHash) so we can wire both chat tabs --
-  const adminSk = randomFieldElement();
-  const adminPkHash = await deriveOwnerPkHash(adminSk);
 
   const buyerKey = buyerWallet.privateKey;
   const relayKey = relayWallet.privateKey;
@@ -98,12 +89,12 @@ test('full voucher flow across all three dapps', async ({ browser }) => {
   await expect(userPage.locator('#notesList')).not.toContainText('pending checkpoint');
   await expect(userPage.locator('#assignNote option')).toHaveCount(1);
 
-  // Fill assign form (explicitly select the option — dropdown's default
-  // selection in headless Chromium is not reliable for dynamically-added
-  // options).
+  // Fill assign form. Explicit option selection because headless
+  // Chromium doesn't reliably default-select dynamically added options.
+  // Community + dest pkHash are now a single dropdown — the dapp derives
+  // the pkHash from the cid via demoCommunityPkHash.
   await userPage.selectOption('#assignNote', { index: 0 });
-  await userPage.fill('#communityId', COMMUNITY_ID);
-  await userPage.fill('#destOwnerPk', adminPkHash.toString());
+  await userPage.selectOption('#assignCommunity', COMMUNITY_ID);
   await userPage.fill('#destValue', '60');                       // 60 dest / 40 change
 
   await userPage.click('#proveAssignBtn');
@@ -150,19 +141,15 @@ test('full voucher flow across all three dapps', async ({ browser }) => {
   adminPage.on('console', (m) => console.log(`[chat-admin] ${m.type()} ${m.text()}`));
   adminPage.on('pageerror', (e) => console.log(`[chat-admin] pageerror ${e.message}`));
 
-  // Pre-seed IDB with our chosen sk BEFORE the community-import handler
-  // runs (it generates a fresh sk if none exists, which would diverge from
-  // adminPkHash). Need to land on the chat origin first.
-  await adminPage.goto(`${CHAT_URL}/`);
-  await seedCommunitySk(adminPage, COMMUNITY_ID, adminSk);
-  // Now navigate to the community-import URL.
+  // Admin's community sk is now derived from cid via demoCommunitySk, so
+  // user and admin agree without any IDB seeding.
   await adminPage.goto(cImportLink);
-  // The dapp auto-switches to admin mode.
   await adminPage.click('#modeAdmin');
   await expect(adminPage.locator('#adminNotes')).toContainText('(#1)', { timeout: 30_000 });
   await expect(adminPage.locator('#adminNotes')).not.toContainText('pending');
 
-  await adminPage.fill('#operatorAddr', relayAddr);
+  // Operator dropdown is populated from cfg.demoOperators by the dapp.
+  await adminPage.selectOption('#redeemOperator', { index: 0 });
   await adminPage.fill('#redeemValue', '60');
 
   await adminPage.click('#proveRedeemBtn');

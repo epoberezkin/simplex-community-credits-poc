@@ -7,7 +7,8 @@
     "build:circuits": "cd circuits && pnpm run build",
     "build:contracts": "cd contracts && pnpm run build",
     "build:core": "cd packages/core && pnpm run build",
-    "test:e2e": "cd test/e2e && pnpm run test"
+    "test:e2e": "cd test/e2e && pnpm run test",
+    "demo": "cd tools && pnpm run demo"
   },
   "engines": {
     "node": ">=20"

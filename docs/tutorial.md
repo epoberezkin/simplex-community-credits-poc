@@ -83,120 +83,68 @@ Pin `polkadot-stable2503`; later runtime tags work but ship newer
 `eth-rpc` versions. Source build alternative (~15 min):
 `cargo install --git https://github.com/paritytech/polkadot-sdk eth-rpc`.
 
-## 1 — Fork Polkadot Asset Hub with chopsticks
+## 1 — Run the demo
 
-boot a forked node + the eth-rpc bridge:
-
-```bash
-# purge any old state. only needed when switching chains
-rm -f ~/.local/share/eth-rpc/eth-rpc.db*
-CHAIN=polkadot bash chopsticks/run.sh
-```
-
-What this does:
-
-- Forks Polkadot Asset Hub at the latest finalized block from public RPCs
-  (`chopsticks/polkadot-asset-hub.yml` lists the endpoints).
-- Applies an `import-storage` block that prefunds three PoC-specific keys
-  (deployer / buyer / relay, derived from
-  `keccak256("simplex-community-credits-poc-{role}-v1")`) with 1000 DOT
-  each, and mints 1 unit of tUSDC (asset id 1984) into the buyer's
-  substrate-derived account.
-- Starts `eth-rpc` on `:8545`, exposing the fork over the standard
-  Ethereum JSON-RPC so wallets / ethers / hardhat can talk to it.
-
-Wait until the terminal prints:
-
-```
-[ready] chopsticks ws://127.0.0.1:8000
-[ready] eth-rpc    http://127.0.0.1:8545
-```
-
-Leave this running in its own terminal. Ctrl+C stops both.
-
-Open a browser to observe events in: [js-apps](https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A8000#/explorer)
-
-First boot fetches ~50–200 MB of chain state into
-`chopsticks/polkadot-asset-hub.sqlite*`; subsequent boots are near-instant.
-Delete the sqlite files to force a fresh fetch.
-
-## 2 — Deploy the contract suite
-
-In a second terminal, with chopsticks running:
+One command boots chopsticks + eth-rpc, deploys the contract suite,
+starts the three Vite dev servers, and prints the dapp URLs:
 
 ```bash
-pnpm --filter tools run deploy
+pnpm demo
 ```
 
-What this does (see `tools/deploy.mjs`):
+What it does (see `tools/demo.mjs`):
 
-1. Compiles+deploys PoseidonT3, IncrementalMerkleTree (lib), the four
-   Groth16 verifiers (create / assign / redeem / checkpoint), a TestUSDC
-   ERC-20, and `VoucherPool`.
-2. Mints 1 000 000 micro-tUSDC (1 unit at 6 decimals) to the buyer EOA.
-3. Registers the relay EOA as a `VoucherPool` operator (so it's allowed
-   to submit `redeem` and accrue credit).
-4. Writes the deployed addresses + chainId into each dapp's
-   `public/config.json`.
-5. Writes `tools/last-deploy.json` (used by `tools/checkpoint.mjs`).
+- Boots `chopsticks/run.sh` (CHAIN=polkadot) if `:8545` isn't already
+  open. First boot fetches ~50–200 MB of state into
+  `chopsticks/polkadot-asset-hub.sqlite*`; subsequent boots are seconds.
+- Runs `pnpm --filter tools run deploy`: compiles+deploys PoseidonT3,
+  IncrementalMerkleTree (lib), the four Groth16 verifiers, TestUSDC,
+  `VoucherPool`; mints tUSDC to the buyer; registers the relay as
+  operator; writes deployed addresses into each dapp's `public/config.json`
+  and into `tools/last-deploy.json`.
+- Starts the three Vite dev servers (purchaser :5173, chat :5174,
+  relay :5175) if not already running.
 
-Expected output ends with:
+Final output looks like:
 
 ```
-> wrote packages/purchaser/public/config.json
-> wrote packages/chat/public/config.json
-> wrote packages/relay/public/config.json
-> wrote tools/last-deploy.json
-done.
+================================================================
+  DEMO READY — open these URLs:
+================================================================
+  Purchaser  http://localhost:5173/?demoKey=0x…
+  Chat       http://localhost:5174/
+  Relay      http://localhost:5175/?demoKey=0x…
+================================================================
+  demoKey is stored in localStorage on first open — reload safe.
+  Ctrl+C to stop chopsticks + dev servers.
 ```
 
-If you re-deploy, every dapp picks up the new addresses on next reload.
+Open each URL in a tab. The `?demoKey=` is parsed, persisted in
+`localStorage`, and stripped from the URL bar — so reload keeps you
+authenticated, and the private key isn't visible after the first load.
 
-## 3 — Start the dapps
+If you don't open a URL with `?demoKey=…` (e.g. you load `/` cold),
+each signer dapp shows a "Use built-in test key (demo)" button that
+does the same thing without needing the URL arg.
 
-Open three more terminals (one per dapp), all from the repo root:
+The chat dapp persists view mode (User / Community admin) and the
+last community id across reloads in `localStorage` too, so a refresh
+keeps you in the same place.
 
-```bash
-pnpm --filter @community-credits/purchaser run dev   # http://localhost:5173
-pnpm --filter @community-credits/chat      run dev   # http://localhost:5174
-pnpm --filter @community-credits/relay     run dev   # http://localhost:5175
-```
+**Test keys are not secrets** — derived from public strings in
+`tools/keys.mjs`. Never use them on a real chain.
 
-Each is a Vite dev server. They are completely independent SPAs — they
-communicate only via deep links (the user pastes/clicks a URL with a
-`?import=…` / `?relay=…` / `?community-import=…` query string).
+Watch chain events at
+[Polkadot.js Apps](https://polkadot.js.org/apps/?rpc=ws%3A%2F%2Flocalhost%3A8000#/explorer)
+(use `ws://localhost`, not `ws://127.0.0.1` — Chrome's secure-context
+exemption is hostname-string-based).
 
-## 4 — MetaMask setup
+For a real-extension wallet (MetaMask), see §8.
 
-The chat dapp has no wallet. Purchaser and relay do. Each needs the
-chopsticks-forked Polkadot Asset Hub registered as a custom network and
-each needs the corresponding PoC test key imported.
+## 2 — Buy a voucher (purchaser dapp)
 
-Network (Settings → Networks → Add):
-
-- Network name: `Polkadot Asset Hub (chopsticks fork)`
-- RPC URL: `http://localhost:8545`
-- Chain ID: from `tools/last-deploy.json` `chainId` field
-  (`420420419` on the current revive fork)
-- Currency symbol: `DOT`
-
-Import the buyer key into MetaMask (Settings → Accounts → Import Account
-→ Private Key) — print it with:
-
-```bash
-node -e "import('./tools/keys.mjs').then(m=>console.log(m.BUYER_PRIVATE_KEY))"
-```
-
-Switch to it before opening the purchaser dapp. Repeat for the relay key
-(`RELAY_PRIVATE_KEY`) before using the relay dapp.
-
-These keys are not secrets — they're derived from public strings in
-`tools/keys.mjs`. Never reuse them on a real chain.
-
-## 5 — Buy a voucher (purchaser dapp)
-
-1. Open `http://localhost:5173`. Click "Connect" → pick MetaMask → confirm
-   on the BUYER account. MetaMask may prompt to switch network.
+1. In the purchaser tab (from §1), the red "demo mode" banner should
+   already be visible and the buy form unblocked. Skip wallet prompts.
 2. Fill out the buy form:
    - Value: `100` (= 100 micro-tUSDC; the buyer was minted 1 000 000)
    - Expiry epoch: `9999` (epoch counter; far-future for the demo)
@@ -210,7 +158,7 @@ These keys are not secrets — they're derived from public strings in
    handoff to the chat dapp — the note material is in the URL fragment
    only, never sent anywhere.
 
-## 6 — Checkpoint the pending leaf
+## 3 — Checkpoint the pending leaf
 
 The chat dapp will not let you spend a note until the on-chain Merkle
 tree includes it. The buy puts the commitment into the contract's
@@ -233,23 +181,23 @@ pnpm --filter tools run checkpoint -- --watch
 
 This blocks every 4 s, drains anything new it sees, and re-blocks.
 
-## 7 — Import the note in the chat dapp
+## 4 — Import the note in the chat dapp
 
-Open the import link from step 5 — it lands in the chat dapp at
+Open the import link from §2 — it lands in the chat dapp at
 `http://localhost:5174/?import=…`. The dapp:
 
 - decodes the note from the URL,
 - recomputes the commitment from the note's secret material and verifies
   it matches the on-chain `VoucherCreated` event,
 - writes the note to IndexedDB and re-renders the "My vouchers" list,
-- displays `100 tUSDC` (or `⏳ pending checkpoint` if step 6 hasn't
+- displays `100 tUSDC` (or `⏳ pending checkpoint` if §3 hasn't
   finished yet — refresh after the next checkpoint).
 
 The chat dapp is signer-free by construction (`grep -rE
 "BrowserProvider|eth_requestAccounts" packages/chat/src/` returns nothing).
 It only reads chain state via a JSON-RPC provider.
 
-## 8 — Assign to an operator (chat dapp + relay dapp)
+## 5 — Assign to an operator (chat dapp + relay dapp)
 
 In the chat dapp's "Assign" panel:
 
@@ -277,13 +225,17 @@ Click "Assign". The dapp:
    `http://localhost:5175/?relay=assign:<...>` and (separately) a
    `?community-import=…` link representing the dest note.
 
-Open the relay link in the relay dapp window (manually paste it into the
-address bar, or click — they're plain `<a>` tags). The relay dapp:
+Hand the relay link to the relay tab. **Don't click it** — clicking
+navigates away from `?demoKey=`, dropping demo mode. Instead, copy the
+relay link's URL and paste it into the relay tab's "Paste relay deep
+link" input, then click "Add to queue". The relay dapp:
 
 - parses the deep link,
 - queues the tx in its "Pending submissions" UI,
-- you click "Submit" → MetaMask asks for confirmation on the RELAY
-  account → tx is sent.
+- you click "Submit" → tx is sent (no popup; the demo wallet auto-signs).
+
+(In MetaMask mode (§8) clicking the link works because demo state isn't
+in the URL.)
 
 The dest note's `community-import` link is copy/pasted into a second
 chat-dapp tab to simulate the operator receiving it. That tab tracks
@@ -292,12 +244,12 @@ admin-side notes under a separate scope (`community-<id>`).
 Run the checkpointer again so the assign's two new commitments (dest +
 change) move into the tree.
 
-## 9 — Redeem (chat-admin → relay)
+## 6 — Redeem (chat-admin → relay)
 
 In the second chat-dapp tab (admin mode), the dest note now shows as
 spendable. Click the corresponding row and pick "Redeem":
 
-- Operator id: same numeric id as the community id from step 8
+- Operator id: same numeric id as the community id from §5
 - Redeem value: must equal the note's full value (no change allowed on
   redeem; remaining value goes back to the operator as `credit`)
 
@@ -311,16 +263,45 @@ and the dapp's credit-balance widget updates.
 A final checkpoint pass merges the redeem's change commitment into the
 tree (so it could be spent later if change > 0).
 
-## 10 — Withdraw operator credit (relay dapp)
+## 7 — Withdraw operator credit (relay dapp)
 
-Back in the relay dapp, the "Withdraw" panel shows the current
-`credit(relay)` value. Click "Withdraw" → MetaMask → tx → the entire
-credit is paid out from the pool's tUSDC reserves to the relay EOA.
+In the relay tab, the "Withdraw" panel shows the current `credit(relay)`
+value. Click "Withdraw" → tx → the entire credit is paid out from the
+pool's tUSDC reserves to the relay EOA.
 
 Cross-check: query `tUSDC.balanceOf(relay)` from any RPC and you should
 see the redeem value land in the relay account (less the gas spent).
 
-## 11 — Tear down
+## 8 — MetaMask (optional)
+
+If you want to drive the dapps with a real extension wallet (for
+realism, or to eventually test against a real chain), skip the
+`?demoKey=` arg and use MetaMask instead. The flow is identical — just
+connect via the EIP-6963 button each dapp renders.
+
+Network (Settings → Networks → Add):
+
+- Network name: `Polkadot Asset Hub (chopsticks fork)`
+- RPC URL: `http://localhost:8545`
+- Chain ID: from `tools/last-deploy.json` (`420420419` on the revive fork)
+- Currency symbol: `DOT`
+
+Import the buyer + relay keys (Settings → Accounts → Import Account →
+Private Key):
+
+```bash
+node -e "import('./tools/keys.mjs').then(m=>{
+  console.log('Buyer: '+m.BUYER_PRIVATE_KEY);
+  console.log('Relay: '+m.RELAY_PRIVATE_KEY);
+})"
+```
+
+Switch to the buyer account before using the purchaser tab; switch to
+the relay account before using the relay tab. In MetaMask mode you can
+also click relay deep links directly — navigation doesn't drop any
+state since the wallet lives in the extension, not the URL.
+
+## 9 — Tear down
 
 - Ctrl+C the dev servers and `chopsticks/run.sh`.
 - Optional: delete `chopsticks/polkadot-asset-hub.sqlite*` to force a

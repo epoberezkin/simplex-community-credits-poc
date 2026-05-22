@@ -11,7 +11,7 @@ export {
   deriveCommitment,
   deriveNullifier,
 } from './crypto.js';
-export { redeemerHashFromId } from './identity.js';
+export { redeemerHashFromId, demoCommunitySk, demoCommunityPkHash } from './identity.js';
 export { IncrementalMerkleTree, DEFAULT_DEPTH } from './merkle.js';
 export { buildCheckpointInput } from './checkpoint.js';
 export {

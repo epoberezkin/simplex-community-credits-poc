@@ -59,6 +59,9 @@ importers:
       idb-keyval:
         specifier: ^6.2.1
         version: 6.2.2
+      process:
+        specifier: ^0.11.10
+        version: 0.11.10
       qr-scanner:
         specifier: ^1.4.2
         version: 1.4.2
@@ -108,6 +111,9 @@ importers:
       ethers:
         specifier: ^6.13.0
         version: 6.16.0
+      process:
+        specifier: ^0.11.10
+        version: 0.11.10
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -133,6 +139,9 @@ importers:
       ethers:
         specifier: ^6.13.0
         version: 6.16.0
+      process:
+        specifier: ^0.11.10
+        version: 0.11.10
       qr-scanner:
         specifier: ^1.4.2
         version: 1.4.2
@@ -182,6 +191,9 @@ importers:
       '@community-credits/core':
         specifier: workspace:*
         version: link:../packages/core
+      '@polkadot/api':
+        specifier: ^14.0.0
+        version: 14.3.1
       contracts:
         specifier: workspace:*
         version: link:../contracts
@@ -2439,6 +2451,10 @@ packages:
 
   process-nextick-args@2.0.1:
     resolution: {integrity: sha512-3ouUOpQhtgrbOa17J7+uxOTpITYWaGP7/AhoR3+A+/1e9skrzelGi/dXzEYyvbxubEF6Wn2ypscTKiKJFFn1ag==}
+
+  process@0.11.10:
+    resolution: {integrity: sha512-cdGef/drWFoydD1JsMzuFf8100nZl+GT+yacc2bEced5f9Rjk4z+WtFUTBu9PhOi9j/jfmBPu0mMEY4wIdAF8A==}
+    engines: {node: '>= 0.6.0'}
 
   promise@8.3.0:
     resolution: {integrity: sha512-rZPNPKTOYVNEEKFaq1HqTgOwZD+4/YHS5ukLzQCypkj+OkYx7iv0mA91lJlpPPZ8vMau3IIGj5Qlwrx+8iiSmg==}
@@ -5730,6 +5746,8 @@ snapshots:
   prettier@2.8.8: {}
 
   process-nextick-args@2.0.1: {}
+
+  process@0.11.10: {}
 
   promise@8.3.0:
     dependencies:

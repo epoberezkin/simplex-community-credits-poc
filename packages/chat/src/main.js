@@ -16,6 +16,7 @@ import {
   generateKeypair,
   deriveCommitment,
   deriveNullifier,
+  deriveOwnerPkHash,
   randomFieldElement,
   IncrementalMerkleTree,
   redeemerHashFromId,
@@ -23,6 +24,8 @@ import {
   buildAssignLink,
   buildRedeemLink,
   buildCommunityImportLink,
+  demoCommunitySk,
+  demoCommunityPkHash,
 } from '@community-credits/core';
 import { openStore } from '@community-credits/core/store';
 
@@ -100,10 +103,26 @@ async function isCheckpointed(leafIndex) {
 // ---- UI plumbing ----
 
 const $ = (id) => document.getElementById(id);
-let mode = 'user';
+
+// Session state lives in the URL so it survives reload and bookmarking.
+// Steady-state URLs:   /  (user)   |   /?mode=admin&cid=N  (admin)
+// One-shot URLs:       /?import=…  |   /?community-import=…&community-id=N
+// The handlers process the one-shots, then replaceState back to a steady URL.
+function syncUrl() {
+  const u = new URL(location.href);
+  u.search = '';
+  if (mode === 'admin') {
+    u.searchParams.set('mode', 'admin');
+    if (cid) u.searchParams.set('cid', String(cid));
+  }
+  history.replaceState({}, '', u.toString());
+}
+let mode = new URL(location.href).searchParams.get('mode') === 'admin' ? 'admin' : 'user';
+let cid = new URL(location.href).searchParams.get('cid');
 
 function setMode(next) {
   mode = next;
+  syncUrl();
   $('modeUser').classList.toggle('active', next === 'user');
   $('modeAdmin').classList.toggle('active', next === 'admin');
   $('viewMyNotes').hidden = next !== 'user';
@@ -137,15 +156,20 @@ async function handleIncomingDeepLink() {
       assigned: note.assigned,
       spent: false,
     });
-    history.replaceState({}, '', location.pathname);
+    // One-shot URL processed; rewind to a steady-state URL so refresh
+    // doesn't re-trigger it.
+    syncUrl();
     await renderUserNotes();
   } else if (parsed.kind === 'community-import') {
     const note = parsed.note;
     const scope = `community-${parsed.communityId}`;
-    const sk = await store.getKey(scope);
+    let sk = await store.getKey(scope);
     if (!sk) {
-      const fresh = randomFieldElement();
-      await store.putKey(scope, fresh);
+      // Demo: derive sk deterministically from the cid so the assigner's
+      // dest pkHash matches what we'll prove. (Real flow: the community
+      // would publish its pkHash and we'd persist the sk on first onboard.)
+      sk = demoCommunitySk(parsed.communityId);
+      await store.putKey(scope, sk);
     }
     const cm = await deriveCommitment(note);
     await store.add(scope, {
@@ -160,13 +184,44 @@ async function handleIncomingDeepLink() {
       communityId: parsed.communityId,
       spent: false,
     });
-    history.replaceState({}, '', location.pathname);
-    setMode('admin');
+    // Move us into admin view for this community and rewrite the URL
+    // accordingly so reload preserves the admin scope.
+    mode = 'admin';
+    cid = parsed.communityId;
+    syncUrl();
   }
 }
 
+// Render tokens. Each render bumps the counter; if the value changes
+// during awaits, an older run aborts so two concurrent calls can't both
+// clear the host and then both append (= duplicate rows).
+let _userRenderToken = 0;
+let _adminRenderToken = 0;
+// Last-rendered note signature per scope; we only redraw the DOM if it
+// changed. Otherwise a 4s polling loop would visibly blink the list.
+const _lastRenderSig = new Map();
+function noteSig(notes, cid, cpCount) {
+  return JSON.stringify([
+    cid,
+    cpCount,
+    notes.map((n) => [n.commitment, n.value?.toString(), n.spent, cmToLeafIndex.get(n.commitment) ?? null]),
+  ]);
+}
+
 async function renderUserNotes() {
+  const tok = ++_userRenderToken;
   const notes = await store.list('user');
+  if (tok !== _userRenderToken) return;
+  // Pull checkpoint state once so the list reflects spendability.
+  await rebuildMirror().catch(() => {});
+  if (tok !== _userRenderToken) return;
+  const cpCount = pool ? Number(await pool.checkpointedCount().catch(() => 0n)) : 0;
+  if (tok !== _userRenderToken) return;
+  // Skip the DOM rewrite if nothing changed — otherwise the polling loop
+  // visibly re-paints the list every cycle.
+  const sig = noteSig(notes, 'user', cpCount);
+  if (_lastRenderSig.get('user') === sig) return;
+  _lastRenderSig.set('user', sig);
   const host = $('notesList');
   host.innerHTML = '';
   const sel = $('assignNote');
@@ -175,9 +230,6 @@ async function renderUserNotes() {
     host.innerHTML = '<p class="mut">No vouchers yet. Open an <code>?import=…</code> link from the purchaser dapp.</p>';
     return;
   }
-  // Pull checkpoint state once so the list reflects spendability.
-  await rebuildMirror().catch(() => {});
-  const cpCount = pool ? Number(await pool.checkpointedCount().catch(() => 0n)) : 0;
   for (const n of notes) {
     const row = document.createElement('div');
     row.className = 'note-row';
@@ -201,30 +253,42 @@ async function renderUserNotes() {
 }
 
 async function renderAdminNotes() {
+  const tok = ++_adminRenderToken;
+  // `cid` is module state — set by handleIncomingDeepLink and reflected
+  // in the URL (?cid=N) so reload preserves the admin scope.
+  if (!cid) {
+    const empty = 'no-community';
+    if (_lastRenderSig.get('admin') === empty) return;
+    _lastRenderSig.set('admin', empty);
+    $('adminNotes').innerHTML = '<p class="mut">No community received yet. Open a <code>?community-import=…</code> link.</p>';
+    $('adminPkRow').hidden = true;
+    $('redeemNote').innerHTML = '';
+    return;
+  }
+  // Demo communities use a deterministic sk derived from the cid so the
+  // assigner and the admin agree on the pkHash without coordination.
+  // (Real communities would publish their pkHash via onboarding.)
+  let scopeSk = await store.getKey(`community-${cid}`);
+  if (!scopeSk) {
+    scopeSk = demoCommunitySk(cid);
+    await store.putKey(`community-${cid}`, scopeSk);
+  }
+  const pkHash = await deriveOwnerPkHash(scopeSk);
+  $('adminPk').textContent = pkHash.toString();
+  $('adminPkRow').hidden = false;
+  const notes = await store.list(`community-${cid}`);
+  if (tok !== _adminRenderToken) return;
+  await rebuildMirror().catch(() => {});
+  if (tok !== _adminRenderToken) return;
+  const cpCount = pool ? Number(await pool.checkpointedCount().catch(() => 0n)) : 0;
+  if (tok !== _adminRenderToken) return;
+  const sig = noteSig(notes, cid, cpCount);
+  if (_lastRenderSig.get('admin') === sig) return;
+  _lastRenderSig.set('admin', sig);
   const host = $('adminNotes');
   host.innerHTML = '';
   const sel = $('redeemNote');
   sel.innerHTML = '';
-  // List all community scopes — could be multiple communities.
-  const allKeys = await store.list('community-*'); // current store doesn't support globs;
-  // For PoC, iterate known IDs we've seen via the URL handler.
-  const seen = new Set();
-  for (const k of Object.keys(localStorage)) {
-    /* skip */ void k;
-  }
-  // Fall back: scan IDs from past URL imports stored under prefix.
-  // For simplicity, look at all known scopes from the IDB by trying common keys.
-  // The store API doesn't expose a list-scopes, so for the PoC require the user
-  // to land via the community-import link (which has the communityId) and then
-  // we read from that scope.
-  const cid = sessionStorage.getItem('lastCommunityId');
-  if (!cid) {
-    host.innerHTML = '<p class="mut">No community received yet. Open a <code>?community-import=…</code> link.</p>';
-    return;
-  }
-  const notes = await store.list(`community-${cid}`);
-  await rebuildMirror().catch(() => {});
-  const cpCount = pool ? Number(await pool.checkpointedCount().catch(() => 0n)) : 0;
   for (const n of notes) {
     const row = document.createElement('div');
     row.className = 'note-row';
@@ -244,16 +308,6 @@ async function renderAdminNotes() {
       opt.textContent = `${n.value}`;
       sel.appendChild(opt);
     }
-  }
-  void seen;
-  void allKeys;
-}
-
-// Track last community id when a community-import URL is opened.
-async function captureCommunity() {
-  const parsed = parseDeepLink(location.href);
-  if (parsed?.kind === 'community-import') {
-    sessionStorage.setItem('lastCommunityId', parsed.communityId);
   }
 }
 
@@ -285,8 +339,12 @@ async function doAssign() {
   const all = await store.list('user');
   const note = all.find((n) => n.commitment === cm);
   if (!note) return;
-  const communityId = BigInt($('communityId').value);
-  const destOwnerPkHash = BigInt($('destOwnerPk').value);
+  const communityIdStr = $('assignCommunity').value;
+  if (!communityIdStr) return;
+  const communityId = BigInt(communityIdStr);
+  // Demo: derive the dest pkHash from the community id so admin + user
+  // agree without copy-paste. (Real flow: paste the admin's published pkHash.)
+  const destOwnerPkHash = await demoCommunityPkHash(communityIdStr);
   const destValue = BigInt($('destValue').value);
   const status = $('assignStatus');
 
@@ -357,7 +415,8 @@ async function doRedeem() {
   const all = await store.list(scope);
   const note = all.find((n) => n.commitment === cm);
   if (!note) return;
-  const operatorAddr = $('operatorAddr').value.trim();
+  const operatorAddr = $('redeemOperator').value.trim();
+  if (!operatorAddr) return;
   const operatorId = BigInt(operatorAddr);
   const redeemValue = BigInt($('redeemValue').value);
   const status = $('redeemStatus');
@@ -429,7 +488,52 @@ $('scanBtn').onclick = async () => {
 
 // ---- bootstrap ----
 
-await captureCommunity();
+// Wipe note IDB if the deployed VoucherPool address changed since last
+// visit — old notes are orphans (no on-chain events for them) and would
+// be permanently "pending" otherwise, and circuits would fail at the
+// merkle membership check.
+async function wipeIfPoolChanged() {
+  if (!cfg.poolAddress) return;
+  const prev = await store.getKey('_pool');
+  const cur = BigInt(cfg.poolAddress);
+  if (prev === null) {
+    // True first visit (fresh browser context, IDB empty). Just record
+    // the pool; don't wipe — would race against test/probe setup that
+    // seeds keys right after the page load.
+    await store.putKey('_pool', cur);
+    return;
+  }
+  if (prev === cur) return;
+  // Subsequent visit with a different deployed pool — wipe stale notes
+  // (they're orphans against the new VoucherPool, would be permanently
+  // "pending" and circuit-rejected at the merkle membership check).
+  await new Promise((resolve, reject) => {
+    const req = indexedDB.deleteDatabase('keyval-store');
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => resolve();   // best-effort
+  });
+  await store.putKey('_pool', cur);
+  console.log(`[chat] wiped IDB (pool changed to ${cfg.poolAddress.slice(0, 10)}…)`);
+}
+await wipeIfPoolChanged();
+
+// Populate the demo-community + operator dropdowns from cfg. Hardcoded
+// single demo community for now; relays come from the deploy manifest.
+const DEMO_COMMUNITIES = [{ id: '1', label: 'demo community (cid=1)' }];
+for (const c of DEMO_COMMUNITIES) {
+  const o = document.createElement('option');
+  o.value = c.id;
+  o.textContent = c.label;
+  $('assignCommunity').appendChild(o);
+}
+for (const op of (cfg.demoOperators ?? [])) {
+  const o = document.createElement('option');
+  o.value = op.address;
+  o.textContent = `${op.name} (${op.address.slice(0, 10)}…)`;
+  $('redeemOperator').appendChild(o);
+}
+
 await handleIncomingDeepLink();
 await rebuildMirror().catch((e) => console.warn('event replay skipped:', e.message));
 // Respect whatever mode handleIncomingDeepLink picked (community-import
@@ -442,3 +546,11 @@ if (!(await store.getKey('user'))) {
   await store.putKey('user', k.sk);
   console.log('generated user pkHash =', k.ownerPkHash.toString());
 }
+
+// Polling loop: catch on-chain changes (new checkpoints flipping a note
+// from "pending" to spendable, new VoucherCreated/Assigned events, etc.)
+// without forcing the user to reload.
+setInterval(() => {
+  if (mode === 'user') renderUserNotes().catch(() => {});
+  else renderAdminNotes().catch(() => {});
+}, 4_000);

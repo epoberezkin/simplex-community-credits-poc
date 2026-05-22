@@ -25,35 +25,62 @@ const POOL_ABI = [
   'function credit(address) view returns (uint256)',
   'function isKnownRoot(uint256) view returns (bool)',
 ];
+const ERC20_ABI = [
+  'function balanceOf(address) view returns (uint256)',
+];
 
 const $ = (id) => document.getElementById(id);
 
 let signer;
 let userAddr;
 let pool;
+let provider;
+let usdc;
 const queue = [];
 
+function fmtDot(wei) { return (Number(wei) / 1e10).toFixed(4); }
+async function refreshAll() {
+  if (!pool || !userAddr || !provider) return;
+  try {
+    const [dot, u, c] = await Promise.all([
+      provider.getBalance(userAddr),
+      usdc.balanceOf(userAddr),
+      pool.credit(userAddr),
+    ]);
+    $('balDot').textContent = fmtDot(dot);
+    $('balUsdc').textContent = u.toString();
+    $('creditBal').textContent = c.toString();
+  } catch { /* RPC blip; try again next tick */ }
+}
+setInterval(refreshAll, 3_000);
+
 // Demo / Playwright path: ?demoKey=<0x-prefixed-privkey> skips EIP-6963
-// and uses a local ethers.Wallet against cfg.ethRpcUrl.
-function demoKeyFromUrl() {
-  const u = new URL(location.href);
-  const k = u.searchParams.get('demoKey');
+// and uses a local ethers.Wallet against cfg.ethRpcUrl. URL is the only
+// source of truth — reload preserves it (browser keeps the query). URL
+// with the key IS the bookmark.
+const TEST_RELAY_KEY = ethers.keccak256(
+  ethers.toUtf8Bytes('simplex-community-credits-poc-relay-v1'),
+);
+
+function getDemoKey() {
+  const k = new URL(location.href).searchParams.get('demoKey');
   return k && /^0x[0-9a-fA-F]{64}$/.test(k) ? k : null;
 }
 
 async function bootDemoMode(key) {
-  const provider = new ethers.JsonRpcProvider(cfg.ethRpcUrl);
+  provider = new ethers.JsonRpcProvider(cfg.ethRpcUrl);
   signer = new ethers.NonceManager(new ethers.Wallet(key, provider));
   userAddr = await signer.getAddress();
   pool = new ethers.Contract(cfg.poolAddress, POOL_ABI, signer);
+  usdc = new ethers.Contract(cfg.stablecoinAddress, ERC20_ABI, provider);
   $('wallets').innerHTML =
     '<p class="err" style="background:#fee;padding:0.4rem;border-radius:4px">' +
-    '⚠ Demo mode — using URL-supplied key. Do NOT use on a real chain.</p>';
+    '⚠ Demo mode — using local key. Do NOT use on a real chain.</p>';
   $('walletStatus').textContent = `demo • ${userAddr}`;
   $('walletStatus').className = 'ok';
   $('queue').hidden = false;
   $('credit').hidden = false;
-  await refreshCredit();
+  await refreshAll();
   await checkInboundUrl();
 }
 
@@ -61,6 +88,12 @@ async function renderWallets() {
   const list = await discoverProviders();
   const host = $('wallets');
   host.innerHTML = '';
+  // Test-key shortcut — always available.
+  const demoBtn = document.createElement('button');
+  demoBtn.textContent = 'Use built-in test key (demo)';
+  demoBtn.onclick = () => bootDemoMode(TEST_RELAY_KEY);
+  demoBtn.style.background = '#fee';
+  host.appendChild(demoBtn);
   for (const w of list) {
     const b = document.createElement('button');
     b.textContent = `Connect ${w.info.name}`;
@@ -68,7 +101,11 @@ async function renderWallets() {
     host.appendChild(b);
   }
   if (list.length === 0) {
-    host.innerHTML = '<p class="err">No wallet detected.</p>';
+    const p = document.createElement('p');
+    p.className = 'mut';
+    p.style.marginTop = '0.4rem';
+    p.textContent = 'No extension wallet detected. Use the test key for a local demo.';
+    host.appendChild(p);
   }
 }
 
@@ -77,22 +114,14 @@ async function connect(eip1193, name) {
   const browser = new ethers.BrowserProvider(eip1193);
   signer = await browser.getSigner();
   pool = new ethers.Contract(cfg.poolAddress, POOL_ABI, signer);
+  provider = browser;
+  usdc = new ethers.Contract(cfg.stablecoinAddress, ERC20_ABI, provider);
   $('walletStatus').textContent = `${name} • ${userAddr}`;
   $('walletStatus').className = 'ok';
   $('queue').hidden = false;
   $('credit').hidden = false;
-  await refreshCredit();
+  await refreshAll();
   await checkInboundUrl();
-}
-
-async function refreshCredit() {
-  if (!pool) return;
-  try {
-    const c = await pool.credit(userAddr);
-    $('creditBal').textContent = c.toString();
-  } catch (e) {
-    $('creditBal').textContent = `(error: ${e.shortMessage || e.message})`;
-  }
 }
 
 function unpackProof(flat) {
@@ -117,6 +146,7 @@ function addToQueue(url) {
   renderQueue();
 }
 
+const inFlight = new Map();        // queue-idx → status text
 function renderQueue() {
   const host = $('queueList');
   host.innerHTML = '';
@@ -144,20 +174,31 @@ function renderQueue() {
     const left = document.createElement('span');
     left.textContent = label + reason;
     if (!canSubmit) left.className = 'err';
-    const submit = document.createElement('button');
-    submit.textContent = 'Submit';
-    submit.disabled = !canSubmit;
-    submit.onclick = () => submitBundle(i);
+    const right = document.createElement('span');
+    const busy = inFlight.get(i);
+    if (busy) {
+      right.className = 'mut';
+      right.textContent = busy;
+    } else {
+      const submit = document.createElement('button');
+      submit.textContent = 'Submit';
+      submit.disabled = !canSubmit;
+      submit.onclick = () => submitBundle(i);
+      right.appendChild(submit);
+    }
     row.appendChild(left);
-    row.appendChild(submit);
+    row.appendChild(right);
     host.appendChild(row);
   });
 }
 
 async function submitBundle(idx) {
+  if (inFlight.has(idx)) return;
   const item = queue[idx];
   const b = item.bundle;
   const { pA, pB, pC } = unpackProof(b.proof);
+  inFlight.set(idx, '⏳ sending…');
+  renderQueue();
   try {
     let tx;
     if (item.kind === 'assign') {
@@ -165,11 +206,21 @@ async function submitBundle(idx) {
     } else {
       tx = await pool.redeem(b.nullifier, b.expiryEpoch, b.redeemValue, b.cmChange, b.root, b.operatorId, pA, pB, pC);
     }
+    inFlight.set(idx, `⏳ mining ${tx.hash.slice(0, 10)}…`);
+    renderQueue();
     await tx.wait();
     queue.splice(idx, 1);
+    inFlight.delete(idx);
+    // Compact remaining inFlight indices (since splice shifted them).
+    const reindexed = new Map();
+    for (const [k, v] of inFlight) reindexed.set(k > idx ? k - 1 : k, v);
+    inFlight.clear();
+    for (const [k, v] of reindexed) inFlight.set(k, v);
     renderQueue();
-    await refreshCredit();
+    await refreshAll();
   } catch (e) {
+    inFlight.delete(idx);
+    renderQueue();
     alert(`Submit failed: ${e.shortMessage || e.message}`);
   }
 }
@@ -203,7 +254,7 @@ $('withdrawBtn').onclick = async () => {
     status.textContent = 'Submitting withdraw…';
     await (await pool.withdraw(c)).wait();
     status.innerHTML = `<span class="ok">Withdrew ${c} tUSDC.</span>`;
-    await refreshCredit();
+    await refreshAll();
   } catch (e) {
     status.innerHTML = `<span class="err">${e.shortMessage || e.message}</span>`;
   }
@@ -213,10 +264,16 @@ async function checkInboundUrl() {
   const parsed = parseDeepLink(location.href);
   if (parsed) {
     addToQueue(location.href);
-    history.replaceState({}, '', location.pathname);
+    // Strip the one-shot ?assign=/?redeem= but preserve ?demoKey= so
+    // reload keeps the demo session.
+    const u = new URL(location.href);
+    for (const k of ['assign', 'redeem', 'import', 'community-import', 'community-id']) {
+      u.searchParams.delete(k);
+    }
+    history.replaceState({}, '', u.toString());
   }
 }
 
-const _demoKey = demoKeyFromUrl();
+const _demoKey = getDemoKey();
 if (_demoKey) await bootDemoMode(_demoKey);
 else renderWallets();
