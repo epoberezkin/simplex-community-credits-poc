@@ -48,10 +48,40 @@ function fmtDot(wei) {
   const n = wei < 0n ? -wei : wei;
   return `${sign}${(Number(n) / 1e18).toFixed(6)} DOT`;
 }
-function fmtArg(v) {
-  if (typeof v === 'bigint') return v.toString();
-  if (typeof v === 'string' && v.startsWith('0x') && v.length > 18) return v.slice(0, 12) + '…';
-  return String(v);
+function shortHex(v, n = 12) {
+  const s = typeof v === 'bigint' ? '0x' + v.toString(16) : String(v);
+  return s.length > n + 2 ? s.slice(0, n + 2) + '…' : s;
+}
+function tUsdcText(raw) {
+  const s = (Number(raw) / 1e6).toString();
+  return `${s} tUSDC`;
+}
+
+// One human sentence per pool event — attributes the action to the
+// dapp/agent that submitted the underlying tx. Returns null to suppress.
+function describePoolEvent(name, args) {
+  switch (name) {
+    case 'OperatorRegistered':
+      return `[deployer    → chain] registered operator ${args.operator}`;
+    case 'VoucherCreated':
+      return `[Dapp A      → chain] buyer minted voucher ${tUsdcText(args.value)} ` +
+        `(cm ${shortHex(args.cm)}, leafIdx ${args.leafIndex}, expires epoch ${args.expiryEpoch})`;
+    case 'Assigned':
+      return `[Dapp C      → chain] relay submitted ASSIGN — ` +
+        `dest leafIdx ${args.destLeafIndex} / change leafIdx ${args.changeLeafIndex}, ` +
+        `nullifier ${shortHex(args.nullifier)}`;
+    case 'Redeemed':
+      return `[Dapp C      → chain] relay submitted REDEEM ${tUsdcText(args.redeemValue)} ` +
+        `to operator ${args.operator.slice(0, 10)}… ` +
+        `(change leafIdx ${args.changeLeafIndex}, nullifier ${shortHex(args.nullifier)})`;
+    case 'Checkpointed':
+      return `[checkpointer→ chain] tree advanced count ${args.oldCount} → ${args.newCount}`;
+    case 'Withdrawn':
+      return `[Dapp C      → chain] operator ${args.operator.slice(0, 10)}… withdrew ${tUsdcText(args.amount)}`;
+    case 'StreamAppended':
+      return null; // covered by VoucherCreated / Assigned / Redeemed
+  }
+  return null;
 }
 
 function loadDeploy() {
@@ -88,7 +118,7 @@ async function refreshDeployArtifacts() {
 }
 
 function fmtUsdc(units) {
-  return `${units} (= ${(Number(units) / 1e6).toFixed(6)} tUSDC)`;
+  return (Number(units) / 1e6).toString() + ' tUSDC';
 }
 async function reportBalanceDelta(blockNumber) {
   for (const { label, address } of ACCOUNTS) {
@@ -98,7 +128,7 @@ async function reportBalanceDelta(blockNumber) {
       const prev = lastDot.get(label);
       lastDot.set(label, bal);
       if (prev !== undefined && bal !== prev) {
-        console.log(`balance  ${label}  DOT  ${fmtDot(bal - prev)}  (now ${fmtDot(bal)})`);
+        console.log(`[balance] ${label.padEnd(8)} DOT   ${fmtDot(bal - prev).padStart(11)}   (now ${fmtDot(bal)})`);
       }
     } catch {}
     // tUSDC (stablecoin) — only when we know the deployed contract address.
@@ -111,7 +141,7 @@ async function reportBalanceDelta(blockNumber) {
           const delta = bal - prev;
           const sign = delta < 0n ? '-' : '+';
           const abs = delta < 0n ? -delta : delta;
-          console.log(`balance  ${label}  tUSDC ${sign}${abs}  (now ${fmtUsdc(bal)})`);
+          console.log(`[balance] ${label.padEnd(8)} tUSDC ${sign}${(Number(abs)/1e6).toString().padStart(9)} tUSDC   (now ${fmtUsdc(bal)})`);
         }
       } catch {}
     }
@@ -132,15 +162,15 @@ async function fetchPoolLogs(fromBlock, toBlock) {
     try {
       const parsed = poolIface.parseLog(log);
       if (!parsed) continue;
-      const args = parsed.fragment.inputs
-        .map((inp, i) => `${inp.name}=${fmtArg(parsed.args[i])}`)
-        .join(' ');
-      console.log(`VoucherPool.${parsed.name}(${args})`);
+      const named = {};
+      parsed.fragment.inputs.forEach((inp, i) => { named[inp.name] = parsed.args[i]; });
+      const line = describePoolEvent(parsed.name, named);
+      if (line) console.log(line);
     } catch { /* unknown topic — skip */ }
   }
 }
 
-console.log(`watching ${ETH_RPC_URL} for VoucherPool events + DOT balance changes…`);
+console.log(`watching ${ETH_RPC_URL} for VoucherPool events + DOT / tUSDC balance changes…`);
 
 while (true) {
   await refreshDeployArtifacts();
