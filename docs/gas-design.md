@@ -1,5 +1,30 @@
 # Gas-driven design redesign for pallet-revive
 
+## Status update (issues #2 + #3)
+
+The "production" notes that originally appeared in §§3b and 5 (B≥8 batched
+checkpoints; on-chain Merkle frontier so any third-party can take over
+checkpointing) have been implemented:
+
+- **Batched checkpoint**, B_MAX=8 in one `checkpoint()` extrinsic, with
+  zero-padding so 1 ≤ count ≤ 8 is accepted. Issue #2.
+- **On-chain Merkle frontier**, `uint256[20]` written by `applyCheckpoint`,
+  exposed by `checkpointedFrontier()`. Checkpointer is now stateless — it
+  reads frontier and stream tail from chain instead of replaying history.
+  Issue #3.
+- **No on-chain time gating** on `checkpoint()` — anyone can submit at any
+  time the chain accepts. The 5-min cadence (#2 second requirement) is a
+  scheduler convention enforced inside `tools/checkpoint.mjs`, not a
+  protocol invariant.
+
+Circuit constraints: ~40K non-linear (B_MAX=8, depth 20). 52 public
+inputs. Fits ptau-17 (~131K coverage) comfortably. See
+`circuits/src/checkpoint.circom`.
+
+The historical "BATCH=1 PoC" discussion below stays for context. Numbers
+in the chopsticks-fork measurements predate these changes — re-run the
+chopsticks e2e for current per-action fees with the batched contract.
+
 ## TL;DR
 
 The original `buyAndCreate` / `assign` / `redeem` operations OutOfGas on

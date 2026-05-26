@@ -1,64 +1,85 @@
 // In-memory incremental Merkle tree with Poseidon(2) hash. Used by:
 //   - the core test harness (mirror of the on-chain tree)
 //   - the chat dapp's witness builder, fed by event indexing
+//   - the checkpointer's witness builder (frontier + new leaves)
 //
-// Must match the on-chain IncrementalMerkleTree.sol byte-for-byte (same depth,
-// same Poseidon constants, same zero-value scheme).
+// Must match the on-chain StreamAndRootRing.sol byte-for-byte (same depth,
+// same Poseidon constants, ZERO_LEAF=0).
+//
+// Internally maintains Tornado-style `filledSubtrees[]` so that frontier()
+// and root() are O(1) reads after each insert. `proof(leafIndex)` still
+// walks the full leaves array (needed by spenders for inclusion paths).
 
 import { poseidonHash } from './poseidon.js';
 
 export const DEFAULT_DEPTH = 20;
 
-// Default zero-value used by Tornado/Semaphore-style trees. Any field element
-// works; this one is "keccak256('community-credits-poc') mod r" rounded down,
-// but for the PoC we just use 0n since that matches a fresh storage slot.
+// Matches the on-chain frontier convention (an empty slot hashes as 0).
 const ZERO_LEAF = 0n;
 
 export class IncrementalMerkleTree {
   constructor(depth = DEFAULT_DEPTH) {
     this.depth = depth;
-    this.leaves = []; // bigint[]
-    this.zeros = null; // bigint[depth+1], lazily computed
-    this._cachedRoot = null;
+    this.leaves = [];                          // bigint[] — needed by proof()
+    this.filledSubtrees = null;                // Tornado-style frontier; lazy
+    this._zeros = null;                        // zeros[0..depth]
+    this._root = null;
   }
 
-  async _zeros() {
-    if (this.zeros) return this.zeros;
+  async _ensureInit() {
+    if (this._zeros) return;
     const z = new Array(this.depth + 1);
     z[0] = ZERO_LEAF;
-    for (let i = 1; i <= this.depth; i++) {
-      z[i] = await poseidonHash([z[i - 1], z[i - 1]]);
+    for (let d = 1; d <= this.depth; d++) {
+      z[d] = await poseidonHash([z[d - 1], z[d - 1]]);
     }
-    this.zeros = z;
-    return z;
+    this._zeros = z;
+    if (!this.filledSubtrees) this.filledSubtrees = new Array(this.depth).fill(0n);
+    if (this._root === null) this._root = z[this.depth];
   }
 
+  // Append a leaf and incrementally update filledSubtrees + cached root.
+  // Returns the inserted leaf index (= position).
   async insert(leaf) {
-    this.leaves.push(BigInt(leaf));
-    this._cachedRoot = null;
-    return this.leaves.length - 1;
+    await this._ensureInit();
+    const idx = this.leaves.length;
+    const value = BigInt(leaf);
+    this.leaves.push(value);
+    let current = value;
+    for (let d = 0; d < this.depth; d++) {
+      if (((idx >> d) & 1) === 0) {
+        this.filledSubtrees[d] = current;
+        current = await poseidonHash([current, this._zeros[d]]);
+      } else {
+        current = await poseidonHash([this.filledSubtrees[d], current]);
+      }
+    }
+    this._root = current;
+    return idx;
   }
 
   async root() {
-    if (this._cachedRoot !== null) return this._cachedRoot;
-    const zeros = await this._zeros();
-    let level = this.leaves.slice();
-    for (let d = 0; d < this.depth; d++) {
-      const next = [];
-      for (let i = 0; i < level.length; i += 2) {
-        const left = level[i];
-        const right = i + 1 < level.length ? level[i + 1] : zeros[d];
-        next.push(await poseidonHash([left, right]));
-      }
-      level = next;
-    }
-    this._cachedRoot = level.length ? level[0] : zeros[this.depth];
-    return this._cachedRoot;
+    await this._ensureInit();
+    return this._root;
   }
 
-  // Returns { pathElements: bigint[depth], pathIndices: 0|1[depth], root }
+  // Snapshot of the current Tornado-style filledSubtrees. Returned as a
+  // fresh array so callers can mutate without disturbing this instance.
+  async frontier() {
+    await this._ensureInit();
+    return [...this.filledSubtrees];
+  }
+
+  async zeros() {
+    await this._ensureInit();
+    return [...this._zeros];
+  }
+
+  // Sibling path for proving inclusion of leaves[leafIndex].
+  // Returns { pathElements: bigint[depth], pathIndices: 0|1[depth], root }.
   async proof(leafIndex) {
-    const zeros = await this._zeros();
+    await this._ensureInit();
+    const zeros = this._zeros;
     const pathElements = [];
     const pathIndices = [];
     let level = this.leaves.slice();
@@ -80,47 +101,5 @@ export class IncrementalMerkleTree {
     }
     const root = level.length ? level[0] : zeros[this.depth];
     return { pathElements, pathIndices, root };
-  }
-
-  // Canonical sibling path for inserting at position `insertIndex` (which
-  // must equal the next free position, i.e. this.leaves.length). Returns the
-  // same pathElements that the on-chain frontier would have at this moment.
-  // After calling this, the leaf can be inserted with `await this.insert(leaf)`
-  // and the resulting root computed via `await this.root()`.
-  async appendPath(insertIndex) {
-    if (insertIndex !== this.leaves.length) {
-      throw new Error(`appendPath only valid at nextIndex; got ${insertIndex}, expected ${this.leaves.length}`);
-    }
-    const zeros = await this._zeros();
-    const pathElements = [];
-    // Build the path level-by-level. For each level d:
-    //   if bit d of insertIndex is 0, the new slot is the LEFT child →
-    //     sibling is the RIGHT child, which is the empty zero at level d.
-    //   if bit d of insertIndex is 1, the new slot is the RIGHT child →
-    //     sibling is the LEFT child, which is the canonical "filled subtree"
-    //     hash at level d (Tornado/Semaphore terminology).
-    let level = this.leaves.slice();
-    let idx = insertIndex;
-    for (let d = 0; d < this.depth; d++) {
-      const isRight = idx & 1;
-      if (isRight) {
-        // sibling is left = level[idx - 1] (definitely exists because we're
-        // at position idx and the new slot at idx is currently zero).
-        pathElements.push(level[idx - 1] ?? zeros[d]);
-      } else {
-        // sibling is right = zero (nothing past idx exists yet).
-        pathElements.push(zeros[d]);
-      }
-      // Hash forward to next level for the next iteration.
-      const next = [];
-      for (let i = 0; i < level.length; i += 2) {
-        const l = level[i];
-        const r = i + 1 < level.length ? level[i + 1] : zeros[d];
-        next.push(await poseidonHash([l, r]));
-      }
-      level = next;
-      idx = idx >> 1;
-    }
-    return pathElements;
   }
 }

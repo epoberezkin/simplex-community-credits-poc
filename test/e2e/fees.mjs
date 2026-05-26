@@ -140,10 +140,11 @@ function printRow(r) {
 // Map a wrap-label to an action category. Kept here (not at the call
 // site) so the report groups consistently across hardhat + chopsticks.
 function actionOf(label) {
-  if (/^buyAndCreate|approve|create$/.test(label)) return 'voucher issuance';
+  if (/^buyAndCreate/.test(label))                 return 'voucher issuance';
+  if (/^approve/.test(label))                      return 'stablecoin approval';
   if (/^assign/.test(label))                       return 'voucher assignment';
   if (/^redeem/.test(label))                       return 'voucher redemption';
-  if (/^checkpoint/.test(label))                   return 'checkpoint';
+  if (/checkpoint/i.test(label))                   return 'checkpoint';
   if (/^withdraw/.test(label))                     return 'operator withdraw';
   if (/^mint|^registerOperator$/.test(label))      return 'setup';
   return 'other';
@@ -155,52 +156,73 @@ let _subjectRoles = {};
 export function declareSubjects(map) { _subjectRoles = { ...map }; }
 function subjectOf(payer, label) {
   // Checkpointer might use the relay key for billing; tag by label first.
-  if (/^checkpoint/.test(label)) return 'checkpointer';
+  if (/checkpoint/i.test(label)) return 'checkpointer';
   return _subjectRoles[payer?.toLowerCase()] ?? 'other';
 }
 
 // Aggregator usable by hardhat mode (gas only) or chopsticks mode.
 export function gasReport() {
   if (records.length === 0) return;
-  console.log('\n── Gas summary by action ──');
+  console.log('\n── Gas summary by action (avg per tx) ──');
   const byAction = new Map();
   for (const r of records) {
     if (r.gasUsed == null) continue;
     const k = actionOf(r.label);
-    byAction.set(k, (byAction.get(k) ?? 0n) + r.gasUsed);
+    const entry = byAction.get(k) ?? { total: 0n, count: 0 };
+    entry.total += r.gasUsed;
+    entry.count += 1;
+    byAction.set(k, entry);
   }
-  for (const [k, v] of [...byAction.entries()].sort()) {
-    console.log(`  ${k.padEnd(22)} ${v.toString().padStart(10)} gas`);
+  for (const [k, { total, count }] of [...byAction.entries()].sort()) {
+    const avg = total / BigInt(count);
+    let suffix = `[${count} txs]`;
+    if (k === 'stablecoin approval') {
+      suffix = `[${count} txs, once per account]`;
+    } else if (k === 'checkpoint') {
+      // Worst case (single user): each action's output must be
+      // checkpointed before the next action can prove inclusion.
+      // buy→cp→assign→cp→redeem→cp = 3 checkpoints per flow.
+      suffix = `[${count} txs, <=3 per flow]`;
+    }
+    const payer = (k === 'voucher issuance' || k === 'stablecoin approval') ? 'user ' : 'relay';
+    console.log(`  ${k.padEnd(22)} ${avg.toString().padStart(10)} gas/tx (${payer})  ${suffix}`);
   }
 }
 
 export function subjectFeeReport({ dotUsd = 1.30 } = {}) {
   if (records.length === 0) return;
-  console.log('\n── Fee summary by subject ──');
+  console.log('\n── Fee summary by subject (avg per tx) ──');
   const bySubject = new Map();
   for (const r of records) {
     const s = subjectOf(r.payer, r.label);
-    const row = bySubject.get(s) ?? { fee: 0n, storage: 0n, gas: 0n };
+    const row = bySubject.get(s) ?? { fee: 0n, storage: 0n, gas: 0n, count: 0 };
     row.fee += r.fee ?? 0n;
     row.storage += r.storageDeposit ?? 0n;
     if (r.gasUsed != null) row.gas += r.gasUsed;
+    row.count += 1;
     bySubject.set(s, row);
   }
   for (const [subj, row] of [...bySubject.entries()].sort()) {
-    const allIn = row.fee + row.storage;
+    const n = BigInt(row.count);
+    const avgFee = row.fee / n;
+    const avgStorage = row.storage / n;
+    const avgGas = row.gas / n;
+    const avgAllIn = avgFee + avgStorage;
     console.log(
-      `  ${subj.padEnd(15)} gas=${row.gas.toString().padStart(10)}  ` +
-        `fee=${fmt(row.fee).padStart(11)} DOT  ` +
-        `deposit=${fmt(row.storage).padStart(11)} DOT  ` +
-        `all-in=${fmt(allIn).padStart(11)} DOT` +
-        (allIn > 0n ? `  ($${(Number(allIn) / Number(PLANCK_PER_DOT) * dotUsd).toFixed(4)})` : ''),
+      `  ${subj.padEnd(15)} gas=${avgGas.toString().padStart(10)}/tx  ` +
+        `fee=${fmt(avgFee).padStart(11)} DOT  ` +
+        `deposit=${fmt(avgStorage).padStart(11)} DOT  ` +
+        `all-in=${fmt(avgAllIn).padStart(11)} DOT` +
+        (avgAllIn > 0n ? `  ($${(Number(avgAllIn) / Number(PLANCK_PER_DOT) * dotUsd).toFixed(4)})` : '') +
+        `  [${row.count} txs]`,
     );
   }
 }
 
 export function feeReport({ dotUsd = 1.30 } = {}) {
   if (records.length === 0) return;
-  console.log('\n── Fee summary (chopsticks fork of Polkadot Asset Hub) ──');
+  // Count buyAndCreate txs as the number of complete voucher flows.
+  const flowCount = records.filter((r) => /^buyAndCreate/.test(r.label)).length || 1;
   let totalFee = 0n;
   let totalStorage = 0n;
   let totalFrozen = 0n;
@@ -211,27 +233,26 @@ export function feeReport({ dotUsd = 1.30 } = {}) {
     totalFrozen += r.frozenDelta;
     if (r.gasUsed != null) totalGas += r.gasUsed;
   }
-  const totalDot = Number(totalFee + totalStorage) / Number(PLANCK_PER_DOT);
-  const blockPct = (Number(totalGas) / Number(PER_BLOCK_NORMAL_GAS)) * 100;
-  const flowsPerBlock = Math.floor(Number(PER_BLOCK_NORMAL_GAS) / Number(totalGas));
+  const perFlowGas = totalGas / BigInt(flowCount);
+  const perFlowFee = totalFee / BigInt(flowCount);
+  const perFlowStorage = totalStorage / BigInt(flowCount);
+  const perFlowAllIn = perFlowFee + perFlowStorage;
+  const perFlowDot = Number(perFlowAllIn) / Number(PLANCK_PER_DOT);
+  const blockPct = (Number(perFlowGas) / Number(PER_BLOCK_NORMAL_GAS)) * 100;
+  const flowsPerBlock = Math.floor(Number(PER_BLOCK_NORMAL_GAS) / Number(perFlowGas));
 
+  console.log(`\n── Fee summary (chopsticks fork of Polkadot Asset Hub, per flow, ${flowCount} flows) ──`);
   console.log(
-    `  TOTAL inclusion fees: ${fmt(totalFee)} DOT (${totalFee} plancks)`,
+    `  Inclusion fee/flow:   ${fmt(perFlowFee)} DOT`,
   );
   console.log(
-    `  TOTAL storage locked: ${fmt(totalStorage)} DOT (${totalStorage} plancks)`,
+    `  Storage deposit/flow: ${fmt(perFlowStorage)} DOT`,
   );
   console.log(
-    `  TOTAL frozen delta:   ${fmt(totalFrozen)} DOT (${totalFrozen} plancks)`,
+    `  All-in/flow:          ${fmt(perFlowAllIn)} DOT  ($${(perFlowDot * dotUsd).toFixed(4)} @ DOT=$${dotUsd})`,
   );
   console.log(
-    `  All-in:               ${fmt(totalFee + totalStorage)} DOT (${totalFee + totalStorage} plancks)`,
-  );
-  console.log(
-    `  All-in @ DOT=$${dotUsd}: $${(totalDot * dotUsd).toFixed(4)}`,
-  );
-  console.log(
-    `  Blockspace:           gas=${totalGas}  ` +
+    `  Blockspace/flow:      gas=${perFlowGas}  ` +
       `block-fraction=${blockPct.toFixed(2)}%  ` +
       `full-flows/block=${flowsPerBlock}`,
   );

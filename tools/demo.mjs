@@ -250,12 +250,16 @@ async function main() {
     dep.on('error', rej);
   });
 
-  // ---- 4. checkpointer (watch mode) ----
+  // ---- 4. checkpointer (watch mode, demo cadence) ----
   // Drains pending leaves into the checkpointed tree as txs come in so
-  // the chat dapp never gets stuck on a "⏳ pending" note. Polls every
-  // 4s — see tools/checkpoint.mjs.
+  // the chat dapp never gets stuck on a "⏳ pending" note. Production
+  // cadence is 5 min; demo overrides to 20 s so the UI feels responsive.
   console.log('[demo] starting checkpoint watcher…');
-  spawnChild('checkpoint', 'node', ['tools/checkpoint.mjs', '--watch'], {}, { fatal: false });
+  spawnChild('checkpoint', 'node', ['tools/checkpoint.mjs', '--watch'], {
+    CP_POLL_MS: '1000',
+    CP_MIN_MS:  '5000',
+    CP_AGE_MS:  '2000',
+  }, { fatal: false });
 
   // ---- 5. dev servers (Vite reuses if already up via its own port check) ----
   console.log('[demo] starting dapp dev servers…');

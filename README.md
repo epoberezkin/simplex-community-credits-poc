@@ -64,28 +64,41 @@ Expected logs explain all necessary steps for a full voucher flow:
 starting hardhat node…
   pool   : 0x5FC8d32690cc91D4c39d9d3abcBD16989F875707
   tUSDC  : 0x5FbDB2315678afecb367f032d93F642f64180aa3
-• Dapp A — buyer proves create + buyAndCreate … ok (794 ms)
-• checkpoint after buy … ok (1490 ms)
-• Dapp B — chat imports note … ok (3 ms)
-• Dapp B (chat) — prove assign, no signer … ok (799 ms)
-• Dapp C (relay) — submit assign tx … ok (190 ms)
-• checkpoint after assign … ok (2788 ms)
-• double-spend assign reverts … ok (58 ms)
-• Dapp B (community) — prove redeem … ok (844 ms)
-• Dapp C (relay) — submit redeem tx … ok (207 ms)
-• checkpoint after redeem … ok (1540 ms)
-• Dapp C — operator withdraw … ok (170 ms)
-• solvency invariant holds … ok (85 ms)
-• codec round-trip is byte-exact … ok (2 ms)
+• Dapp A — userA buys 100 tUSDC … ok (683 ms)
+• Dapp A — userB buys 100 tUSDC … ok (368 ms)
+• checkpoint after buys (drain 2) … ok (2093 ms)
+• userA → commA assign 20 … ok (514 ms)
+• userB → commA assign 20 … ok (525 ms)
+• checkpoint after commA assigns (drain 4) … ok (2076 ms)
+• userA → commB assign 30 (from change) … ok (569 ms)
+• userB → commB assign 30 (from change) … ok (542 ms)
+• checkpoint after commB assigns (drain 4) … ok (2174 ms)
+• commA → relayA redeem 5 … ok (534 ms)
+• commA → relayB redeem 8 … ok (545 ms)
+• commB → relayA redeem 5 … ok (616 ms)
+• commB → relayB redeem 8 … ok (496 ms)
+• checkpoint after redeems (drain 4) … ok (2141 ms)
+• credit balances are 10 (relayA) and 16 (relayB) … ok (33 ms)
+• relayA withdraws 10 … ok (177 ms)
+• relayB withdraws 16 … ok (200 ms)
+• solvency invariant holds … ok (90 ms)
+• extra userA buy seeds 1 pending leaf … ok (400 ms)
+• checkpoint(count=0) reverts ckp/no-progress … ok (38 ms)
+• checkpoint(count=9 > B_MAX) reverts ckp/batch-size … ok (28 ms)
+• checkpoint(fabricated newFrontier) reverts ckp/proof … ok (2069 ms)
+• permissionless: random key submits valid checkpoint … ok (2248 ms)
+• post-adversary solvency still holds … ok (87 ms)
+• codec round-trip is byte-exact … ok (3 ms)
 
-── Gas summary by action ──
-  checkpoint                1158348 gas
-  operator withdraw           78502 gas
-  voucher assignment         332637 gas
-  voucher issuance           407200 gas
-  voucher redemption         362124 gas
+── Gas summary by action (avg per tx) ──
+  checkpoint                 804958 gas/tx (relay)  [5 txs, <=3 per flow]
+  operator withdraw           69930 gas/tx (relay)  [2 txs]
+  stablecoin approval         46095 gas/tx (user )  [3 txs, once per account]
+  voucher assignment         332704 gas/tx (relay)  [4 txs]
+  voucher issuance           315497 gas/tx (user )  [3 txs]
+  voucher redemption         340730 gas/tx (relay)  [4 txs]
 
-13/13 steps passed
+25/25 steps passed
 ```
 
 (Numbers shift slightly between runs; the categories and order are stable.)
@@ -206,6 +219,7 @@ browser. For the UI-driven variant see "Playwright UI variant" below.
 node contracts/scripts/compile-resolc.mjs                   # ~16s; needed for pallet-revive
 
 # in one terminal:
+# clean up with `rm -f ~/.local/share/eth-rpc/eth-rpc.db*`
 CHAIN=polkadot bash chopsticks/run.sh                       # boots chopsticks + eth-rpc
 
 # in another, once chopsticks is up:
@@ -226,33 +240,42 @@ The harness ends with three blocks of output — per-tx fee detail, a
 by-subject roll-up, and a gas-by-action roll-up:
 
 ```
-── Fee summary (chopsticks fork of Polkadot Asset Hub) ──
-  TOTAL inclusion fees: 9.393e-2 DOT (939260000 plancks)
-  TOTAL storage locked:        0 DOT (0 plancks)
-  TOTAL frozen delta:          0 DOT (0 plancks)
-  All-in:               9.393e-2 DOT (939260000 plancks)
-  All-in @ DOT=$1.3: $0.1221
-  Blockspace:           gas=93926  block-fraction=2.00%  full-flows/block=49
+── Fee summary (chopsticks fork of Polkadot Asset Hub, per flow, 2 flows) ──
+  Inclusion fee/flow:   1.373e-1 DOT
+  Storage deposit/flow:        0 DOT
+  All-in/flow:          1.373e-1 DOT  ($0.1785 @ DOT=$1.3)
+  Blockspace/flow:      gas=171670  block-fraction=3.66%  full-flows/block=27
   (Per-block normal gas budget = 4687500 = MAX_BLOCK_WEIGHT × NORMAL_DISPATCH_RATIO / GasScale.)
 
-── Fee summary by subject ──
-  buyer           gas=     23227  fee=   2.323e-2 DOT  deposit=          0 DOT  all-in=   2.323e-2 DOT  ($0.0302)
-  checkpointer    gas=     32407  fee=   3.241e-2 DOT  deposit=          0 DOT  all-in=   3.241e-2 DOT  ($0.0421)
-  paymaster + operator gas=     38292  fee=   3.829e-2 DOT  deposit=          0 DOT  all-in=   3.829e-2 DOT  ($0.0498)
+── Fee summary by subject (avg per tx) ──
+  checkpointer    gas=     38352/tx  fee=   3.068e-2 DOT  deposit=          0 DOT  all-in=   3.068e-2 DOT  ($0.0399)  [4 txs]
+  relayA          gas=     15613/tx  fee=   1.249e-2 DOT  deposit=          0 DOT  all-in=   1.249e-2 DOT  ($0.0162)  [7 txs]
+  relayB          gas=     12354/tx  fee=   9.884e-3 DOT  deposit=          0 DOT  all-in=   9.884e-3 DOT  ($0.0128)  [3 txs]
+  userA           gas=     14191/tx  fee=   1.135e-2 DOT  deposit=          0 DOT  all-in=   1.135e-2 DOT  ($0.0148)  [2 txs]
+  userB           gas=      7593/tx  fee=   6.075e-3 DOT  deposit=          0 DOT  all-in=   6.075e-3 DOT  ($0.0079)  [2 txs]
 
-── Gas summary by action ──
-  checkpoint                  32407 gas
-  operator withdraw            8411 gas
-  voucher assignment          13475 gas
-  voucher issuance            23227 gas
-  voucher redemption          16406 gas
+── Gas summary by action (avg per tx) ──
+  checkpoint                  38352 gas/tx (relay)  [4 txs, <=3 per flow]
+  operator withdraw            8515 gas/tx (relay)  [2 txs]
+  stablecoin approval          5119 gas/tx (user )  [2 txs, once per account]
+  voucher assignment          16408 gas/tx (relay)  [4 txs]
+  voucher issuance            16666 gas/tx (user )  [2 txs]
+  voucher redemption          15924 gas/tx (relay)  [4 txs]
 
-13/13 steps passed
+19/19 steps passed
 ```
 
 (Exact numbers depend on the upstream block fork and the runtime version
 at the time of the snapshot. The ranges are stable; storage deposits
 dominate.)
+
+> **Note:** the numbers above were captured against the BATCH=1 PoC.
+> Since then, `checkpoint()` was upgraded to a B_MAX=8 batched extrinsic
+> with the Merkle frontier stored on-chain (issues #2 + #3). Per-flow
+> cost is expected to drop because one checkpoint now covers up to 8
+> leaves, while each individual checkpoint extrinsic becomes more
+> expensive (~20 extra SSTOREs for the frontier). Re-run the chopsticks
+> e2e to refresh.
 
 Useful env vars:
 

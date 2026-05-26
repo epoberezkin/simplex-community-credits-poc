@@ -66,7 +66,7 @@ export async function ensureHardhat() {
         cwd: REPO_ROOT,
         env: process.env,
         stdio: ['ignore', 'inherit', 'inherit'],
-        detached: false,
+        detached: true,
       },
     );
     child.unref();
@@ -89,7 +89,7 @@ export async function ensureHardhat() {
 
 export async function killHardhat(pid) {
   if (!pid) return;
-  try { process.kill(pid, 'SIGKILL'); } catch {}
+  try { process.kill(-pid, 'SIGKILL'); } catch {}
   await sleep(500);
 }
 

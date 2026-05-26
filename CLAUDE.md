@@ -247,6 +247,19 @@ polkadot-api + smoldot.
   units (see docs/gas-design.md §"Per-op weight"). Tested green on
   chopsticks-forked Polkadot Asset Hub.
 
+- **Batched checkpoint + on-chain Merkle frontier (issues #2 + #3).**
+  `checkpoint()` now accepts up to `CHECKPOINT_BATCH_MAX=8` leaves per
+  extrinsic via one Groth16 verify, amortising fees ~6×. The contract
+  stores the Tornado-style frontier (`uint256[20]`) and the SNARK proves
+  the (oldFrontier → newFrontier) transition; checkpointer is therefore
+  stateless and a fresh instance can take over without history replay.
+  Public-input layout (52 entries) is documented at the top of
+  `checkpoint()` in `VoucherPool.sol` and at the bottom of
+  `circuits/src/checkpoint.circom` — keep both in sync if either side
+  changes. **No on-chain time gating**: the 5-min cadence (#2 second
+  requirement) lives in `tools/checkpoint.mjs`'s scheduler only, so any
+  participant (an SMP relay, an affected user) can step in at will.
+
 - **Stale PVM artifacts silently break the chopsticks e2e.**
   `test/e2e/deploy.mjs` loads from `contracts/artifacts-pvm/` when
   `TARGET=chopsticks` (pallet-revive needs PolkaVM bytecode, not EVM).
@@ -277,6 +290,13 @@ polkadot-api + smoldot.
 
 ## What's NOT done
 
+- Re-run chopsticks-fork e2e + refresh the README's per-action fee
+  numbers after the batched-checkpoint + frontier landing (issues #2 +
+  #3). The current numbers in `README.md` predate B_MAX=8 and the
+  frontier SSTOREs; per-flow cost is expected to drop (one checkpoint
+  amortises ~5 leaves) but each checkpoint becomes more expensive (~20
+  extra SSTOREs for the frontier). Run `bash chopsticks/run.sh` +
+  `pnpm --filter e2e run test:chopsticks` to refresh.
 - Auto-rebuild of PVM artifacts on circuits change. `compile-resolc.mjs`
   remains a manual step (deploy.mjs gates with a clear error). If we
   want a one-command flow, wire it into a `pnpm build:pvm` script or

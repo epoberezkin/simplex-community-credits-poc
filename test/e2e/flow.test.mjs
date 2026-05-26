@@ -31,6 +31,7 @@ import {
   buildRedeemLink,
   parseDeepLink,
   buildCheckpointInput,
+  CHECKPOINT_BATCH_MAX,
 } from '@community-credits/core';
 import { proveCreate, proveAssign, proveRedeem, proveCheckpoint } from '@community-credits/core/proof';
 
@@ -89,6 +90,12 @@ function assertOk(cond, msg) {
 // --------------------------------------------------------- hardhat startup ---
 
 let hardhatProc = null;
+// Ensure the hardhat child is killed even on ctrl-C / SIGTERM / unhandled throw.
+// process.on('exit') is synchronous — kill() works but await does not.
+process.on('exit', killHardhat);
+process.on('SIGINT', () => process.exit(130));
+process.on('SIGTERM', () => process.exit(143));
+
 async function startHardhatNode() {
   // Refuse to start if something is already listening on :8545.
   // Common cause: a stray `eth-rpc` / chopsticks bridge from a previous
@@ -114,6 +121,7 @@ async function startHardhatNode() {
       {
         cwd: new URL('../../contracts/', import.meta.url).pathname,
         env: { ...process.env },
+        detached: true,
       },
     );
     let buf = '';
@@ -131,11 +139,14 @@ async function startHardhatNode() {
   });
 }
 
-async function stopHardhatNode() {
+function killHardhat() {
   if (!hardhatProc) return;
-  hardhatProc.kill('SIGKILL');
-  await wait(200);
+  try { process.kill(-hardhatProc.pid, 'SIGKILL'); } catch {}
   hardhatProc = null;
+}
+async function stopHardhatNode() {
+  killHardhat();
+  await wait(200);
 }
 
 // --------------------------------------------------------- chat-side store ---
@@ -285,23 +296,24 @@ async function main() {
   const communityAStore  = new NoteStore();
   const communityBStore  = new NoteStore();
 
-  // Drain the pendingStream by submitting one checkpoint per commitment
-  // (PoC uses BATCH=1; production should batch B≥8 — see docs/gas-design.md
-  // §3b for the design and §5 for the cost analysis). Bills checkpointing
-  // to relayA since both relays are valid checkpointers.
+  // Drain the pendingStream in batches of CHECKPOINT_BATCH_MAX (8) per
+  // extrinsic — one SNARK + one verifier call amortised across up to 8
+  // leaves. See issue #2 (batching) and #3 (frontier on-chain).
+  // Bills checkpointing to relayA since both relays are valid checkpointers.
   async function drainCheckpoints() {
     while (pendingStream.length > 0) {
       const oldCount = Number(await pool.checkpointedCount());
-      const cm = pendingStream[0];
-      const { input } = await buildCheckpointInput({ mirror, cm, oldCount });
+      const n = Math.min(pendingStream.length, CHECKPOINT_BATCH_MAX);
+      const batch = pendingStream.slice(0, n);
+      const { input } = await buildCheckpointInput({ mirror, cms: batch, oldCount });
       const { proofFlat } = await proveCheckpoint(input);
       const { pA, pB, pC } = unpackProof(proofFlat);
-      await wrap(`checkpoint #${oldCount + 1}`, relayAAddr, () =>
+      await wrap(`checkpoint(n=${n})`, relayAAddr, () =>
         pool.connect(relayA).checkpoint(
-          input.newRoot, input.newCount, pA, pB, pC, callOpts,
+          input.newRoot, input.newFrontier, n, pA, pB, pC, callOpts,
         ),
       );
-      pendingStream.shift();
+      pendingStream.splice(0, n);
     }
   }
 
@@ -555,12 +567,24 @@ async function main() {
     assertEq(await pool.credit(relayAAddr), REDEEM_TO_RA * 2n, 'relayA credit');
     assertEq(await pool.credit(relayBAddr), REDEEM_TO_RB * 2n, 'relayB credit');
   });
+  // On chopsticks the eth-rpc eth_call may lag one block behind the
+  // just-mined withdraw tx. Poll until the balance reflects the transfer
+  // (up to 30 s — two chopsticks block times).
+  async function balanceAfterWithdraw(addr, expected) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < 30_000) {
+      const b = await tUsdc.balanceOf(addr);
+      if (b >= expected) return b;
+      await wait(2_000);
+    }
+    return tUsdc.balanceOf(addr);
+  }
   await step('relayA withdraws 10', async () => {
     const before = await tUsdc.balanceOf(relayAAddr);
     await wrap('withdraw relayA', relayAAddr, () =>
       pool.connect(relayA).withdraw(REDEEM_TO_RA * 2n, callOpts),
     );
-    const after = await tUsdc.balanceOf(relayAAddr);
+    const after = await balanceAfterWithdraw(relayAAddr, before + REDEEM_TO_RA * 2n);
     assertEq(after - before, REDEEM_TO_RA * 2n, 'relayA tUSDC delta');
     assertEq(await pool.credit(relayAAddr), 0n, 'relayA credit drained');
   });
@@ -569,7 +593,7 @@ async function main() {
     await wrap('withdraw relayB', relayBAddr, () =>
       pool.connect(relayB).withdraw(REDEEM_TO_RB * 2n, callOpts),
     );
-    const after = await tUsdc.balanceOf(relayBAddr);
+    const after = await balanceAfterWithdraw(relayBAddr, before + REDEEM_TO_RB * 2n);
     assertEq(after - before, REDEEM_TO_RB * 2n, 'relayB tUSDC delta');
     assertEq(await pool.credit(relayBAddr), 0n, 'relayB credit drained');
   });
@@ -584,6 +608,98 @@ async function main() {
     const unspent    = mintedE - spentE - reclaimedE;
     assertEq(unspent + credits, deposited - withdrawn, 'solvency');
   });
+
+  // -------- adversary cases for the batched checkpoint --------
+  // Hardhat-only: revert-reason matching relies on eth_estimateGas
+  // running the tx in simulation and throwing the reason string. On
+  // pallet-revive with explicit gasLimit, ethers bypasses estimation and
+  // the tx gets mined with status=0 without throwing — the test can't
+  // detect the revert inline. Contract logic is the same either way; we
+  // just can't observe it from JS on chopsticks.
+  if (target === 'hardhat') {
+    await step('extra userA buy seeds 1 pending leaf', async () => {
+      const extraNote = await doBuy(userAKp, buyerA, buyerAAddr, 'userA-extra');
+      userAStore.add(extraNote);
+    });
+    await step('checkpoint(count=0) reverts ckp/no-progress', { pure: true }, async () => {
+      const zeroFrontier = new Array(20).fill(0n);
+      const zeroProof = { pA: [0n, 0n], pB: [[0n, 0n], [0n, 0n]], pC: [0n, 0n] };
+      try {
+        await pool.connect(relayA).checkpoint(
+          0n, zeroFrontier, 0, zeroProof.pA, zeroProof.pB, zeroProof.pC, callOpts,
+        );
+        throw new Error('expected revert');
+      } catch (e) {
+        assertOk(/no-progress/.test(e.message), `got: ${e.message}`);
+      }
+    });
+    await step('checkpoint(count=9 > B_MAX) reverts ckp/batch-size', { pure: true }, async () => {
+      const zeroFrontier = new Array(20).fill(0n);
+      const zeroProof = { pA: [0n, 0n], pB: [[0n, 0n], [0n, 0n]], pC: [0n, 0n] };
+      try {
+        await pool.connect(relayA).checkpoint(
+          0n, zeroFrontier, 9, zeroProof.pA, zeroProof.pB, zeroProof.pC, callOpts,
+        );
+        throw new Error('expected revert');
+      } catch (e) {
+        assertOk(/batch-size/.test(e.message), `got: ${e.message}`);
+      }
+    });
+    await step('checkpoint(fabricated newFrontier) reverts ckp/proof', { pure: true }, async () => {
+      const oldCount = Number(await pool.checkpointedCount());
+      const cm = pendingStream[0];
+      const probeMirror = new IncrementalMerkleTree();
+      await probeMirror._ensureInit();
+      probeMirror.filledSubtrees = (await pool.checkpointedFrontier()).map((x) => BigInt(x));
+      probeMirror._root = BigInt(await pool.checkpointedRoot());
+      probeMirror.leaves = new Array(oldCount).fill(0n);
+      const { input } = await buildCheckpointInput({ mirror: probeMirror, cms: [cm], oldCount });
+      const { proofFlat } = await proveCheckpoint(input);
+      const { pA, pB, pC } = unpackProof(proofFlat);
+      const tampered = [...input.newFrontier];
+      tampered[0] = tampered[0] ^ 1n;
+      try {
+        await pool.connect(relayA).checkpoint(
+          input.newRoot, tampered, 1, pA, pB, pC, callOpts,
+        );
+        throw new Error('expected revert');
+      } catch (e) {
+        assertOk(/ckp\/proof/.test(e.message), `got: ${e.message}`);
+      }
+    });
+    await step('permissionless: random key submits valid checkpoint', async () => {
+      const stranger = new ethers.NonceManager(
+        new ethers.Wallet(ethers.hexlify(ethers.randomBytes(32)), provider)
+      );
+      const strangerAddr = await stranger.getAddress();
+      await provider.send('hardhat_setBalance', [
+        strangerAddr, '0xDE0B6B3A7640000',
+      ]);
+      const oldCount = Number(await pool.checkpointedCount());
+      const cm = pendingStream[0];
+      const { input } = await buildCheckpointInput({ mirror, cms: [cm], oldCount });
+      const { proofFlat } = await proveCheckpoint(input);
+      const { pA, pB, pC } = unpackProof(proofFlat);
+      const txr = await wrap('stranger checkpoint', strangerAddr, () =>
+        pool.connect(stranger).checkpoint(
+          input.newRoot, input.newFrontier, 1, pA, pB, pC, callOpts,
+        ),
+      );
+      assertOk(txr.status === 1, 'tx succeeded');
+      pendingStream.shift();
+      assertEq(await pool.checkpointedCount(), BigInt(oldCount + 1), 'cp advanced');
+    });
+    await step('post-adversary solvency still holds', async () => {
+      const deposited  = await pool.deposited();
+      const withdrawn  = await pool.withdrawn();
+      const credits    = (await pool.credit(relayAAddr)) + (await pool.credit(relayBAddr));
+      const mintedE    = await pool.minted(Number(expiryEpoch));
+      const spentE     = await pool.spent(Number(expiryEpoch));
+      const reclaimedE = await pool.reclaimed(Number(expiryEpoch));
+      const unspent    = mintedE - spentE - reclaimedE;
+      assertEq(unspent + credits, deposited - withdrawn, 'solvency');
+    });
+  }
 
   await step('codec round-trip is byte-exact', { pure: true }, async () => {
     const n = {

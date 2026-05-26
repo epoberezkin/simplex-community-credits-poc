@@ -88,6 +88,14 @@ contract VoucherPool {
         state.init();
     }
 
+    // --- batched-checkpoint config ---
+    // Max # of leaves per checkpoint extrinsic. Fixed in the circuit's
+    // template instantiation; the contract enforces it before SNARK verify.
+    // See issue #2 (batching) for the choice — 8 amortises fees ~6× vs B=1
+    // at a ~50K-constraint cost (fits ptau-17 comfortably).
+    uint32 public constant CHECKPOINT_BATCH_MAX = 8;
+    uint256 internal constant DEPTH = 20;
+
     // --- views ---
     function currentEpoch() public view returns (uint32) {
         return uint32((block.number - genesisBlock) / epochSize);
@@ -97,6 +105,9 @@ contract VoucherPool {
     function streamAt(uint32 position) external view returns (uint256) { return state.streamAt(position); }
     function checkpointedRoot() external view returns (uint256) { return state.checkpointedRoot; }
     function checkpointedCount() external view returns (uint32) { return state.checkpointedCount; }
+    function checkpointedFrontier() external view returns (uint256[DEPTH] memory) {
+        return state.getFrontier();
+    }
     function isKnownRoot(uint256 root) external view returns (bool) { return state.isKnownRoot(root); }
     function isNullifierSpent(uint32 epoch, uint256 nf) external view returns (bool) {
         return nullifiers[epoch][nf];
@@ -195,41 +206,64 @@ contract VoucherPool {
     }
 
     // --- checkpoint (permissionless; rolls stream → tree root) ---
-    // The SNARK proves: appending the commitments at positions
-    // [oldCount..newCount-1] to the tree at oldRoot produces newRoot. The
-    // contract reads each cm directly from `state.commitments` (SSTORE'd by
-    // buyAndCreate / assign / redeem) and passes them as public inputs so
-    // the prover can't substitute fake values.
+    // Batched, frontier-aware. The SNARK proves that appending the
+    // commitments at positions [oldCount..oldCount+count) to the tree at
+    // (oldRoot, oldFrontier) yields (newRoot, newFrontier). The contract:
+    //   - reads (oldRoot, oldFrontier, oldCount) from state — the prover
+    //     can't fake them;
+    //   - reads cms[0..count) from `state.commitments` and pads the tail
+    //     to zero so the SNARK's fixed B_MAX matches what's on chain;
+    //   - packs all of the above + caller-supplied newRoot/newFrontier
+    //     into the verifier's `pubSignals` array (in the exact order the
+    //     circuit declares).
     //
-    // BATCH is fixed at 1 in this PoC; production should use B≥8. The
-    // checkpoint(...) signature would gain a uint256[B] arg and a tighter
-    // SLOAD loop — see docs/gas-design.md §5.
+    // No on-chain time gating — anyone can submit at any time the chain
+    // accepts. The 5-min cadence is a polite-primary scheduler convention
+    // (tools/checkpoint.mjs), not a protocol invariant. See issue #3 for
+    // the fallback-liveness rationale.
     function checkpoint(
         uint256 newRoot,
-        uint32  newCount,
+        uint256[DEPTH] calldata newFrontier,
+        uint32 count,
         uint[2] calldata pA,
         uint[2][2] calldata pB,
         uint[2] calldata pC
     ) external {
-        uint256 oldRoot = state.checkpointedRoot;
         uint32 oldCount = state.checkpointedCount;
-
-        require(newCount > oldCount, "ckp/no-progress");
+        require(count >= 1, "ckp/no-progress");
+        require(count <= CHECKPOINT_BATCH_MAX, "ckp/batch-size");
+        uint32 newCount = oldCount + count;
         require(newCount <= state.streamCount, "ckp/future");
-        require(newCount == oldCount + 1, "ckp/batch-size");  // PoC: B=1
+        require(newCount <= uint32(1 << DEPTH), "ckp/tree-full");
 
-        uint256 cm0 = state.streamAt(oldCount);
+        uint256 oldRoot = state.checkpointedRoot;
+        uint256[DEPTH] memory oldFrontier = state.getFrontier();
 
-        uint[5] memory pubSignals = [
-            oldRoot,
-            newRoot,
-            uint256(oldCount),
-            uint256(newCount),
-            cm0
-        ];
+        uint[52] memory pubSignals;
+        // Layout matches circuits/src/checkpoint.circom declaration order:
+        //   [0]      oldRoot
+        //   [1]      newRoot
+        //   [2..21]  oldFrontier[0..19]
+        //   [22..41] newFrontier[0..19]
+        //   [42]     oldCount
+        //   [43]     count
+        //   [44..51] cms[0..7]
+        pubSignals[0] = oldRoot;
+        pubSignals[1] = newRoot;
+        for (uint256 d = 0; d < DEPTH; d++) {
+            pubSignals[2 + d] = oldFrontier[d];
+            pubSignals[2 + DEPTH + d] = newFrontier[d];
+        }
+        pubSignals[2 + 2 * DEPTH]     = uint256(oldCount);
+        pubSignals[2 + 2 * DEPTH + 1] = uint256(count);
+        for (uint256 i = 0; i < CHECKPOINT_BATCH_MAX; i++) {
+            // i < count: real leaf from the stream. i >= count: zero pad.
+            pubSignals[2 + 2 * DEPTH + 2 + i] =
+                i < count ? state.streamAt(oldCount + uint32(i)) : 0;
+        }
         require(checkpointVerifier.verifyProof(pA, pB, pC, pubSignals), "ckp/proof");
 
-        state.applyCheckpoint(newRoot, newCount);
+        state.applyCheckpoint(newRoot, newCount, newFrontier);
         emit StreamRingLib.Checkpointed(oldRoot, newRoot, oldCount, newCount);
     }
 

@@ -33,12 +33,13 @@ interface IRedeemVerifier {
 }
 
 // Public inputs (in circuit order):
-//   oldRoot, newRoot, oldCount, newCount, cm
+//   oldRoot, newRoot, oldFrontier[20], newFrontier[20], oldCount, count, cms[8]
+// Total: 1 + 1 + 20 + 20 + 1 + 1 + 8 = 52.
 interface ICheckpointVerifier {
     function verifyProof(
         uint[2] calldata _pA,
         uint[2][2] calldata _pB,
         uint[2] calldata _pC,
-        uint[5] calldata _pubSignals
+        uint[52] calldata _pubSignals
     ) external view returns (bool);
 }
