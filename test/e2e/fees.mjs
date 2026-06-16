@@ -144,7 +144,6 @@ function actionOf(label) {
   if (/^approve/.test(label))                      return 'stablecoin approval';
   if (/^assign/.test(label))                       return 'voucher assignment';
   if (/^redeem/.test(label))                       return 'voucher redemption';
-  if (/checkpoint/i.test(label))                   return 'checkpoint';
   if (/^withdraw/.test(label))                     return 'operator withdraw';
   if (/^mint|^registerOperator$/.test(label))      return 'setup';
   return 'other';
@@ -155,8 +154,6 @@ function actionOf(label) {
 let _subjectRoles = {};
 export function declareSubjects(map) { _subjectRoles = { ...map }; }
 function subjectOf(payer, label) {
-  // Checkpointer might use the relay key for billing; tag by label first.
-  if (/checkpoint/i.test(label)) return 'checkpointer';
   return _subjectRoles[payer?.toLowerCase()] ?? 'other';
 }
 
@@ -178,11 +175,6 @@ export function gasReport() {
     let suffix = `[${count} txs]`;
     if (k === 'stablecoin approval') {
       suffix = `[${count} txs, once per account]`;
-    } else if (k === 'checkpoint') {
-      // Worst case (single user): each action's output must be
-      // checkpointed before the next action can prove inclusion.
-      // buy→cp→assign→cp→redeem→cp = 3 checkpoints per flow.
-      suffix = `[${count} txs, <=3 per flow]`;
     }
     const payer = (k === 'voucher issuance' || k === 'stablecoin approval') ? 'user ' : 'relay';
     console.log(`  ${k.padEnd(22)} ${avg.toString().padStart(10)} gas/tx (${payer})  ${suffix}`);

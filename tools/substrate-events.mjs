@@ -9,7 +9,7 @@
 //
 // Surfaced:
 //   - VoucherPool events decoded against its ABI (VoucherCreated,
-//     Assigned, Redeemed, StreamAppended, Checkpointed)
+//     Assigned, Redeemed, Withdrawn)
 //   - DOT balance deltas for the 3 known accounts (deployer/buyer/relay),
 //     on every new block
 //
@@ -76,12 +76,8 @@ function describePoolEvent(name, args) {
       return `[Dapp C      → chain] relay submitted REDEEM ${tUsdcText(args.redeemValue)} ` +
         `to operator ${args.operator.slice(0, 10)}… ` +
         `(change leafIdx ${args.changeLeafIndex}, nullifier ${shortHex(args.nullifier)})`;
-    case 'Checkpointed':
-      return `[checkpointer→ chain] tree advanced count ${args.oldCount} → ${args.newCount}`;
     case 'Withdrawn':
       return `[Dapp C      → chain] operator ${args.operator.slice(0, 10)}… withdrew ${tUsdcText(args.amount)}`;
-    case 'StreamAppended':
-      return null; // covered by VoucherCreated / Assigned / Redeemed
   }
   return null;
 }

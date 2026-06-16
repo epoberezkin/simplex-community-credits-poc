@@ -2,7 +2,7 @@
 
 End-to-end walkthrough for the V1.1 PoC: chopsticks-forked Polkadot Asset
 Hub → contract deployment → buy → assign → redeem → withdraw across the
-three single-purpose dapps, with the off-chain checkpointer interleaved.
+three single-purpose dapps.
 
 Designed to be reproducible on a clean Linux laptop. Allow ~30 min for a
 first run (10 min downloading chain state for chopsticks, then under 2 min
@@ -19,8 +19,8 @@ newer point releases generally fine):
 - pnpm 9.15 (`pnpm --version` — pnpm 10+ requires Node 22+)
 - `circom` 2.2.3 (only needed to rebuild circuits; precompiled artifacts
   ship in the repo)
-- `solc` 0.8.24 + `resolc` 1.1 (only needed to recompile PVM bytecode;
-  precompiled artifacts ship in `contracts/artifacts-pvm/`)
+- `solc` 0.8.24 (only needed to recompile contracts; Hardhat downloads it
+  on first compile and precompiled artifacts ship in the repo)
 - `eth-rpc` 0.14 (pallet-revive ETH-JSON-RPC bridge; the PoC binds it on
   `:8545`)
 - `@acala-network/chopsticks` (installed on-demand by `chopsticks/run.sh`
@@ -39,35 +39,16 @@ The repo's `circuits/`, `contracts/`, `packages/{core,purchaser,chat,
 relay}`, `test/e2e`, and `tools/` are all workspaces; one `pnpm install`
 at the root wires them up.
 
-### 0.1 — Install solc, resolc, eth-rpc
+### 0.1 — Install eth-rpc
 
 Make sure `~/.local/bin` is on `PATH`
-(`export PATH="$HOME/.local/bin:$PATH"` in `~/.bashrc` if not). All three
-binaries below install into that directory.
+(`export PATH="$HOME/.local/bin:$PATH"` in `~/.bashrc` if not). The binary
+below installs into that directory.
 
-**solc 0.8.24** — Hardhat downloads it on first compile; just symlink the
-cached binary so `resolc` can find it on `PATH`:
-
-```bash
-pnpm --filter contracts run build       # one-time; populates ~/.cache/hardhat-nodejs/…
-mkdir -p ~/.local/bin
-ln -sf ~/.cache/hardhat-nodejs/compilers-v2/linux-amd64/solc-linux-amd64-v0.8.24+commit.e11b9ed9 \
-       ~/.local/bin/solc
-solc --version    # expect: Version: 0.8.24+commit.e11b9ed9…
-```
-
-**resolc 1.1** — prebuilt static binary from
-[paritytech/revive releases](https://github.com/paritytech/revive/releases):
-
-```bash
-curl -L https://github.com/paritytech/revive/releases/download/v0.1.0-dev.16/resolc-x86_64-unknown-linux-musl \
-  -o ~/.local/bin/resolc
-chmod +x ~/.local/bin/resolc
-resolc --version  # expect: …revive compiler version 1.1.0…
-```
-
-Pick the `-musl` build; the `-gnu` build can fail to load on older glibc.
-If a newer release exists, swap the tag — the PoC was built against 1.1.0.
+Contracts are compiled to plain EVM bytecode by Hardhat (which downloads
+`solc 0.8.24` itself on first compile). The very same hardhat-built
+bytecode runs both on a local EVM and on pallet-revive's REVM via the
+eth-rpc bridge — there is no separate PVM/resolc build step.
 
 **eth-rpc 0.14** — prebuilt binary from
 [polkadot-sdk releases](https://github.com/paritytech/polkadot-sdk/releases):
@@ -98,7 +79,7 @@ What it does (see `tools/demo.mjs`):
   open. First boot fetches ~50–200 MB of state into
   `chopsticks/polkadot-asset-hub.sqlite*`; subsequent boots are seconds.
 - Runs `pnpm --filter tools run deploy`: compiles+deploys PoseidonT3,
-  IncrementalMerkleTree (lib), the four Groth16 verifiers, TestUSDC,
+  IncrementalMerkleTree (lib), the three Groth16 verifiers, TestUSDC,
   `VoucherPool`; mints tUSDC to the buyer; registers the relay as
   operator; writes deployed addresses into each dapp's `public/config.json`
   and into `tools/last-deploy.json`.
@@ -139,7 +120,7 @@ Watch chain events at
 (use `ws://localhost`, not `ws://127.0.0.1` — Chrome's secure-context
 exemption is hostname-string-based).
 
-For a real-extension wallet (MetaMask), see §8.
+For a real-extension wallet (MetaMask), see §7.
 
 ## 2 — Buy a voucher (purchaser dapp)
 
@@ -152,36 +133,15 @@ For a real-extension wallet (MetaMask), see §8.
    - generates a fresh note secret key `sk` and randomness,
    - proves the `create` circuit in a worker (~0.5–1 s),
    - approves tUSDC to `VoucherPool`,
-   - calls `buyAndCreate(cm, value, expiry, π)` on the pool.
+   - calls `buyAndCreate(cm, value, expiry, π)` on the pool, which verifies
+     the proof and folds `cm` into the on-chain Merkle tree in the same tx
+     (on-chain Poseidon insert) — no separate checkpoint step.
 4. When the tx confirms, the dapp shows a link (and a QR) of the form
    `http://localhost:5174/?import=<base64-encoded-note>`. This is the
    handoff to the chat dapp — the note material is in the URL fragment
    only, never sent anywhere.
 
-## 3 — Checkpoint the pending leaf
-
-The chat dapp will not let you spend a note until the on-chain Merkle
-tree includes it. The buy puts the commitment into the contract's
-`pending stream`; a checkpointer must roll the stream into the
-`checkpointedRoot` before any membership proof is valid.
-
-Drain the stream once:
-
-```bash
-pnpm --filter tools run checkpoint
-```
-
-Expected output ends with `cp #1 ok (gas …)`. Each leaf costs ~0.007 DOT
-(BATCH=1; production should use B≥8). For a persistent demo it's nicer to
-let the checkpointer poll:
-
-```bash
-pnpm --filter tools run checkpoint -- --watch
-```
-
-This blocks every 4 s, drains anything new it sees, and re-blocks.
-
-## 4 — Import the note in the chat dapp
+## 3 — Import the note in the chat dapp
 
 Open the import link from §2 — it lands in the chat dapp at
 `http://localhost:5174/?import=…`. The dapp:
@@ -190,14 +150,17 @@ Open the import link from §2 — it lands in the chat dapp at
 - recomputes the commitment from the note's secret material and verifies
   it matches the on-chain `VoucherCreated` event,
 - writes the note to IndexedDB and re-renders the "My vouchers" list,
-- displays `100 tUSDC` (or `⏳ pending checkpoint` if §3 hasn't
-  finished yet — refresh after the next checkpoint).
+- displays `100 tUSDC` once the note is spendable, or `⏳ pending
+  confirmation` if the buy tx's insert event hasn't been observed yet. The
+  note becomes spendable as soon as its tx confirms and the chat dapp's
+  4 s poll picks up the on-chain insert event (a few seconds), at which
+  point the row flips to `✓ spendable` — no checkpoint required.
 
 The chat dapp is signer-free by construction (`grep -rE
 "BrowserProvider|eth_requestAccounts" packages/chat/src/` returns nothing).
 It only reads chain state via a JSON-RPC provider.
 
-## 5 — Assign to an operator (chat dapp + relay dapp)
+## 4 — Assign to an operator (chat dapp + relay dapp)
 
 In the chat dapp's "Assign" panel:
 
@@ -214,12 +177,13 @@ In the chat dapp's "Assign" panel:
 
 Click "Assign". The dapp:
 
-1. rebuilds the off-chain Merkle mirror against
-   `checkpointedRoot`/`checkpointedCount` from chain,
-2. looks up this note's leaf index from the cached `StreamAppended`
-   events,
-3. errors with `note not yet checkpointed` if the leaf is still beyond
-   `checkpointedCount` — go run the checkpointer again,
+1. rebuilds the off-chain Merkle mirror from the chain's
+   `VoucherCreated`/`Assigned`/`Redeemed` events, inserting every
+   commitment in `leafIndex` order so the mirror root matches the chain's,
+2. looks up this note's leaf index from those events,
+3. errors with `commitment not yet observed on-chain` if the buy tx's
+   insert event hasn't been seen yet — wait a few seconds for the poll to
+   catch up, then retry,
 4. otherwise proves `assign` in a worker (~1 s),
 5. emits a deep link of the form
    `http://localhost:5175/?relay=assign:<...>` and (separately) a
@@ -234,22 +198,23 @@ link" input, then click "Add to queue". The relay dapp:
 - queues the tx in its "Pending submissions" UI,
 - you click "Submit" → tx is sent (no popup; the demo wallet auto-signs).
 
-(In MetaMask mode (§8) clicking the link works because demo state isn't
+(In MetaMask mode (§7) clicking the link works because demo state isn't
 in the URL.)
 
 The dest note's `community-import` link is copy/pasted into a second
 chat-dapp tab to simulate the operator receiving it. That tab tracks
 admin-side notes under a separate scope (`community-<id>`).
 
-Run the checkpointer again so the assign's two new commitments (dest +
-change) move into the tree.
+The assign tx folds both new commitments (dest + change) into the
+on-chain tree itself, so once it confirms the operator's tab will show
+the dest note as spendable after the next poll — no checkpoint needed.
 
-## 6 — Redeem (chat-admin → relay)
+## 5 — Redeem (chat-admin → relay)
 
 In the second chat-dapp tab (admin mode), the dest note now shows as
 spendable. Click the corresponding row and pick "Redeem":
 
-- Operator id: same numeric id as the community id from §5
+- Operator id: same numeric id as the community id from §4
 - Redeem value: must equal the note's full value (no change allowed on
   redeem; remaining value goes back to the operator as `credit`)
 
@@ -258,12 +223,11 @@ The dapp proves `redeem` (~1 s) and emits
 
 Open the link in the relay dapp, click "Submit". On confirmation the
 redeem amount accrues to the operator's on-chain `credit(relay)` balance
-and the dapp's credit-balance widget updates.
+and the dapp's credit-balance widget updates. The redeem tx also folds
+its change commitment into the on-chain tree in the same tx (so it could
+be spent later if change > 0).
 
-A final checkpoint pass merges the redeem's change commitment into the
-tree (so it could be spent later if change > 0).
-
-## 7 — Withdraw operator credit (relay dapp)
+## 6 — Withdraw operator credit (relay dapp)
 
 In the relay tab, the "Withdraw" panel shows the current `credit(relay)`
 value. Click "Withdraw" → tx → the entire credit is paid out from the
@@ -272,7 +236,7 @@ pool's tUSDC reserves to the relay EOA.
 Cross-check: query `tUSDC.balanceOf(relay)` from any RPC and you should
 see the redeem value land in the relay account (less the gas spent).
 
-## 8 — MetaMask (optional)
+## 7 — MetaMask (optional)
 
 If you want to drive the dapps with a real extension wallet (for
 realism, or to eventually test against a real chain), skip the
@@ -301,7 +265,7 @@ the relay account before using the relay tab. In MetaMask mode you can
 also click relay deep links directly — navigation doesn't drop any
 state since the wallet lives in the extension, not the URL.
 
-## 9 — Tear down
+## 8 — Tear down
 
 - Ctrl+C the dev servers and `chopsticks/run.sh`.
 - Optional: delete `chopsticks/polkadot-asset-hub.sqlite*` to force a
@@ -317,12 +281,12 @@ account. `tools/last-deploy.json` has the chain id; `node -e
 "import('./tools/keys.mjs').then(m=>console.log(m.BUYER_PRIVATE_KEY))"`
 prints the prefunded keys.
 
-**`note not yet checkpointed` in the chat dapp.** Expected — run
-`pnpm --filter tools run checkpoint`. The error message includes the
-note's leaf index and the current `checkpointedCount` so you can confirm
-the gap.
+**`commitment not yet observed on-chain` in the chat dapp.** Transient —
+the buy/assign tx confirmed but the chat dapp's 4 s poll hasn't yet seen
+its insert event. Wait a few seconds and retry; the note flips to
+`✓ spendable` once the event lands.
 
-**`mirror root mismatch` from the checkpointer.** The on-chain tree has
+**`mirror root mismatch` in the chat dapp.** The on-chain tree has
 diverged from the local mirror (a re-fork, a redeploy, or a different
 chopsticks state). Re-run `pnpm --filter tools run deploy` to fresh-start
 or delete the chopsticks sqlite and start over.
@@ -342,8 +306,10 @@ name doesn't match the substring. Kill by PID
 
 ## Reference
 
-- Architecture: see `docs/gas-design.md` for the stream+checkpoint
-  rationale and the on-chain weight measurements that drove it.
+- Architecture: see `docs/gas-design.md` for why each commitment is
+  folded into the on-chain Merkle tree immediately (and why the earlier
+  stream+checkpoint indirection was dropped), with the on-chain weight
+  measurements that drove it.
 - Protocol: `community-credits-poc-plan.md` (esp. §3 simplifications vs
   whitepaper and §8 three-dapp split).
 - Session quirks: `CLAUDE.md` for foot-guns hit while building this.

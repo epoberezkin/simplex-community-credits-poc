@@ -14,12 +14,10 @@ const BUILD = resolve(ROOT, 'build');
 const KEYS = resolve(ROOT, 'keys');
 const PTAU = resolve(ROOT, '..', 'ptau', 'powersOfTau28_hez_final_17.ptau');
 
-// The checkpoint circuit is ~40 K constraints (batch B_MAX=8, depth=20,
-// Tornado-style frontier insertion) and needs ptau-17 (~131 K constraint
-// coverage). create/assign/redeem are unchanged from baseline (≤7 K
-// constraints) and would fit a smaller ptau, but we use one file for all to
-// keep the script simple.
-const CIRCUITS = ['create', 'assign', 'redeem', 'checkpoint'];
+// create/assign/redeem are ≤7 K constraints and fit comfortably under the
+// ptau-17 file already vendored in ptau/. (A smaller ptau would do, but the
+// file is already present so there's no reason to swap it.)
+const CIRCUITS = ['create', 'assign', 'redeem'];
 
 if (!existsSync(PTAU)) {
   throw new Error(`Missing ${PTAU}. Re-run ptau download.`);

@@ -39,9 +39,9 @@ let provider;
 let usdc;
 const queue = [];
 
-// Retry helper for NONCE_EXPIRED — the relay key is shared with the
-// background checkpoint watcher, so two processes can pick the same
-// pending nonce in the window between read and send.
+// Retry helper for NONCE_EXPIRED — a relay key may be used from more than
+// one tab/process, so two senders can pick the same pending nonce in the
+// window between read and send.
 async function sendWithNonceRetry(fn, attempts = 4) {
   for (let i = 1; i <= attempts; i++) {
     try { return await fn(); }
@@ -90,10 +90,9 @@ function getDemoKey() {
 
 async function bootDemoMode(key) {
   provider = new ethers.JsonRpcProvider(cfg.ethRpcUrl);
-  // No NonceManager — the relay key is also used by the background
-  // checkpoint watcher (tools/checkpoint.mjs --watch). An in-memory
-  // NonceManager would drift behind every watcher submission and trip
-  // NONCE_EXPIRED on the user's next click. Plain Wallet re-queries
+  // No NonceManager — a relay key may be shared across tabs/processes. An
+  // in-memory NonceManager would drift behind another sender's submission
+  // and trip NONCE_EXPIRED on the user's next click. Plain Wallet re-queries
   // `eth_getTransactionCount(addr, 'pending')` per send.
   signer = new ethers.Wallet(key, provider);
   userAddr = await signer.getAddress();

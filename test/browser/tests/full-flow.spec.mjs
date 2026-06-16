@@ -26,7 +26,7 @@ import {
   buyerWalletA, buyerWalletB, relayWalletA, relayWalletB,
 } from '../../../tools/keys.mjs';
 import {
-  readDeployManifest, runCheckpointer,
+  readDeployManifest,
 } from '../support/runtime.mjs';
 
 const PURCHASER_URL = 'http://localhost:5173';
@@ -134,9 +134,8 @@ async function chatRedeem(page, operatorAddr, redeemValue) {
 
 // Drive the relay dapp's submit button, but wait on the *on-chain* event
 // count rather than the UI's "Queue empty" signal. Reason: the relay
-// dapp uses `sendWithNonceRetry` to survive a nonce race with the
-// production checkpoint-watcher daemon. Under Playwright (no daemon),
-// that retry occasionally re-broadcasts a tx that already landed,
+// dapp uses `sendWithNonceRetry` to survive a nonce race between senders.
+// That retry can occasionally re-broadcast a tx that already landed,
 // surfacing as a `pool/nullifier` alert even though the chain has
 // accepted the assign. The chain is the source of truth.
 async function relaySubmit(page, deepLink, relayKey, kind, pool, expectedCount) {
@@ -195,7 +194,7 @@ test('2x2x2 voucher flow across all three dapps', async ({ browser }) => {
   expect(userAImport).toContain('import=');
   expect(userBImport).toContain('import=');
 
-  runCheckpointer({ target: 'hardhat' }); // drain 2
+  // (no checkpoint step — notes are spendable as soon as the buy tx lands.)
 
   // ----- chat contexts: one per user; each does 2 assigns -----
   const userACtx = await browser.newContext();
@@ -209,13 +208,13 @@ test('2x2x2 voucher flow across all three dapps', async ({ browser }) => {
   // userA: import buy note, assign 20 to commA
   await userAPage.goto(userAImport);
   await expect(userAPage.locator('#notesList')).toContainText(`${BUY_VALUE} tUSDC`);
-  await expect(userAPage.locator('#notesList')).not.toContainText('pending checkpoint');
+  await expect(userAPage.locator('#notesList')).toContainText('spendable', { timeout: 30_000 });
   const userAToCommA = await chatAssign(userAPage, null, COMM_A_ID, TO_COMM_A);
 
   // userB: import buy note, assign 20 to commA
   await userBPage.goto(userBImport);
   await expect(userBPage.locator('#notesList')).toContainText(`${BUY_VALUE} tUSDC`);
-  await expect(userBPage.locator('#notesList')).not.toContainText('pending checkpoint');
+  await expect(userBPage.locator('#notesList')).toContainText('spendable', { timeout: 30_000 });
   const userBToCommA = await chatAssign(userBPage, null, COMM_A_ID, TO_COMM_A);
 
   // ----- single relay context, reused; submit both assigns as relayA -----
@@ -232,7 +231,6 @@ test('2x2x2 voucher flow across all three dapps', async ({ browser }) => {
 
   await relaySubmit(relayPage, userAToCommA.assignLink, relayAKey, 'assign', pool, baseAssigned + 1);
   await relaySubmit(relayPage, userBToCommA.assignLink, relayAKey, 'assign', pool, baseAssigned + 2);
-  runCheckpointer({ target: 'hardhat' }); // drain 4 (2 dest + 2 change)
 
   // Each user now has a 80-value change note. Assign 30 from it to commB.
   // Wait for the chat dapp's poll to surface the change note (~5 s).
@@ -243,7 +241,6 @@ test('2x2x2 voucher flow across all three dapps', async ({ browser }) => {
 
   await relaySubmit(relayPage, userAToCommB.assignLink, relayAKey, 'assign', pool, baseAssigned + 3);
   await relaySubmit(relayPage, userBToCommB.assignLink, relayAKey, 'assign', pool, baseAssigned + 4);
-  runCheckpointer({ target: 'hardhat' }); // drain 4 (2 dest + 2 change)
 
   // ----- admin chat contexts: one per community, each redeems twice -----
   const commACtx  = await browser.newContext();
@@ -269,11 +266,10 @@ test('2x2x2 voucher flow across all three dapps', async ({ browser }) => {
 
   // commA redeem 2: 8 → relayB
   // (After the first redeem, the spent source note disappears from the
-  // dropdown; the change note is "pending" until next checkpoint.)
+  // dropdown; the change note becomes spendable once its tx lands.)
   await expect(commAPage.locator('#redeemNote option')).toHaveCount(1, { timeout: 30_000 });
   const commAToRB = await chatRedeem(commAPage, relayBAddr, RED_TO_RB);
   await relaySubmit(relayPage, commAToRB, relayBKey, 'redeem', pool, baseRedeemed + 2);
-  runCheckpointer({ target: 'hardhat' }); // drain commA changes
 
   // Same dance for commB.
   await commBPage.goto(userAToCommB.cImport);
@@ -289,7 +285,6 @@ test('2x2x2 voucher flow across all three dapps', async ({ browser }) => {
   await expect(commBPage.locator('#redeemNote option')).toHaveCount(1, { timeout: 30_000 });
   const commBToRB = await chatRedeem(commBPage, relayBAddr, RED_TO_RB);
   await relaySubmit(relayPage, commBToRB, relayBKey, 'redeem', pool, baseRedeemed + 4);
-  runCheckpointer({ target: 'hardhat' }); // drain commB changes
 
   // ----- on-chain credit deltas before withdraw -----
   // The chat dapp parses user input (5, 8, etc.) through parseUsdc which

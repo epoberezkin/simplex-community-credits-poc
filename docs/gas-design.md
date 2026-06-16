@@ -1,725 +1,433 @@
-# Gas-driven design redesign for pallet-revive
+# Gas-driven design for pallet-revive
 
-## Status update (issues #2 + #3)
+## Status update
 
-The "production" notes that originally appeared in §§3b and 5 (B≥8 batched
-checkpoints; on-chain Merkle frontier so any third-party can take over
-checkpointing) have been implemented:
+The protocol folds each commitment into an on-chain Tornado-style
+incremental Merkle tree **immediately**, inside the same user tx that
+emits it (`buyAndCreate` / `assign` / `redeem`). Each insert performs 20
+on-chain `Poseidon(2)` hashes via a `PoseidonT3` contract, and rolls the
+new root into a 100-slot on-chain ring buffer.
 
-- **Batched checkpoint**, B_MAX=8 in one `checkpoint()` extrinsic, with
-  zero-padding so 1 ≤ count ≤ 8 is accepted. Issue #2.
-- **On-chain Merkle frontier**, `uint256[20]` written by `applyCheckpoint`,
-  exposed by `checkpointedFrontier()`. Checkpointer is now stateless — it
-  reads frontier and stream tail from chain instead of replaying history.
-  Issue #3.
-- **No on-chain time gating** on `checkpoint()` — anyone can submit at any
-  time the chain accepts. The 5-min cadence (#2 second requirement) is a
-  scheduler convention enforced inside `tools/checkpoint.mjs`, not a
-  protocol invariant.
+This **replaces** an earlier stream + checkpoint ("mini-rollup") design,
+in which user txs only `SSTORE`d their commitment into an on-chain stream
+and a separate permissionless `checkpoint()` extrinsic later folded
+streamed leaves into the Merkle root inside a SNARK. That indirection
+existed to avoid on-chain Poseidon hashing, which was *believed* to OOG
+pallet-revive's per-extrinsic weight budget. Direct measurement under
+pallet-revive's REVM (EVM-interpreter) path disproved the premise — the
+heavy single tx (Groth16 verify + `transferFrom` + 20-Poseidon insert)
+runs fine — so the stream, the checkpoint extrinsic, the checkpoint
+circuit/verifier, the checkpointer daemon, and the Tornado-frontier-in-
+SNARK were all dropped in favour of immediate on-chain insertion.
 
-Circuit constraints: ~40K non-linear (B_MAX=8, depth 20). 52 public
-inputs. Fits ptau-17 (~131K coverage) comfortably. See
-`circuits/src/checkpoint.circom`.
+Consequences of the immediate-insert design:
 
-The historical "BATCH=1 PoC" discussion below stays for context. Numbers
-in the chopsticks-fork measurements predate these changes — re-run the
-chopsticks e2e for current per-action fees with the batched contract.
+- **No spend latency.** A note is spendable the moment its tx lands; there
+  is no checkpoint cycle to wait for.
+- **Radically simpler state.** No stream mapping, no streamCount, no
+  checkpointedRoot/Count, no batching, no checkpointer liveness
+  dependency. The contract holds only the Tornado frontier
+  (`uint256[20] filledSubtrees`), `nextIndex`, and the 100-root ring
+  buffer.
+- **Higher per-tx gas, by design.** Each user tx now pays for its own 20
+  Poseidon hashes rather than deferring them to a batched actor. This is
+  the trade: more gas per tx for simpler state and immediate
+  spendability. Measured cost is well inside pallet-revive's budget (see
+  §§5–6).
+- **Three circuits only:** `create`, `assign`, `redeem` — unchanged. There
+  is no checkpoint circuit.
+
+The build emits **EVM bytecode only** (solc / hardhat). The *same* EVM
+bytecode runs locally on a hardhat node and on pallet-revive's REVM path
+on a chopsticks-forked Asset Hub. There is no resolc/PVM path,
+no `artifacts-pvm`, and no library linking. `TARGET=chopsticks` now only
+points the harness at the eth-rpc bridge with an explicit `gasLimit`; it
+does not select different bytecode.
 
 ## TL;DR
 
-The original `buyAndCreate` / `assign` / `redeem` operations OutOfGas on
-Paseo Asset Hub because each one calls `PoseidonT3.hash` **20× inside an
-external library** (the on-chain Merkle insert). pallet-revive has no
-Poseidon precompile, so each hash runs as PVM-compiled inline assembly via
-DELEGATECALL, and the per-extrinsic ref_time budget can't absorb 20 of
-them on top of a Groth16 verify and an ERC-20 `transferFrom`.
+The protocol mints and spends fixed-denomination vouchers whose
+commitments live in an append-only Poseidon Merkle tree (depth 20). The
+open question for pallet-revive was whether the on-chain Merkle insert —
+20 `Poseidon(2)` hashes per leaf — fits inside one extrinsic's weight
+budget alongside a Groth16 verify and an ERC-20 `transferFrom`.
 
-Direct measurement (see §1) confirmed something stronger: **a single
-`PoseidonT3.hash` call alone OOGs** on pallet-revive. The
-poseidon-solidity implementation is fundamentally unusable on-chain there.
-So **any design that calls Poseidon on chain — even once per tx — is dead
-on arrival.**
+The earlier design assumed it did not, and moved the tree update off the
+user's tx into a streamed-commitment + batched-checkpoint SNARK. **Direct
+measurement on a chopsticks fork of Asset Hub running pallet-revive's REVM
+disproved that assumption:** the full heavy tx (verify + transferFrom +
+20-Poseidon insert) executes comfortably, and the `IncrementalMerkleTree`
+constructor's 20 Poseidon calls deploy fine.
 
-We considered moving the Merkle tree update inside the ZK circuit
-(buyer proves the `oldRoot → newRoot` transition; contract just SSTOREs
-the new root). That fixes the gas wall but **dead-ends on concurrency**:
-every prover's proof binds to the specific `(oldRoot, nextIndex)` they
-saw, so any concurrent submission serializes the protocol to ~1 tx per
-block — see [§3a](#3a-rejected-per-tx-in-circuit-append) for the analysis.
-
-**Adopted design:** stream + checkpoint (mini-rollup), **with no on-chain
-hashing at all**. The user tx (`buyAndCreate` / `assign` / `redeem`)
-appends each emitted commitment to a `mapping(uint32 => uint256)
-commitments` via plain SSTORE — concurrency-safe, no coordination, no
-Poseidon. A permissionless `checkpoint(...)` reads commitments back via
-SLOAD and rolls them into the off-chain Merkle tree, anchored by a SNARK.
-Spends prove membership against the latest checkpointed root, so notes
-become spendable one checkpoint after creation. See
-[§3b](#3b-stream--checkpoint-the-adopted-design). Implementation passes
-13/13 e2e steps end-to-end on a chopsticks-forked Paseo Asset Hub.
+**Adopted design:** fold each commitment into the on-chain tree
+immediately. `buyAndCreate` / `assign` / `redeem` each call `_insert(cm)`
+(20 on-chain `Poseidon(2)` hashes + frontier SSTOREs), advance the root,
+and push it into a 100-slot ring buffer. Spends prove Merkle membership
+against *any* of the last 100 roots, so a proof built against a
+slightly-stale root still lands under concurrency. Notes are spendable as
+soon as their creating tx lands — no checkpoint latency. The
+implementation passes the full e2e end-to-end on a chopsticks-forked
+Asset Hub under pallet-revive REVM.
 
 ## Table of contents
 
-1. [What drives gas in the current design](#1-what-drives-gas)
+1. [What drives gas](#1-what-drives-gas)
 2. [What comparable systems do](#2-comparable-systems)
-3a. [Rejected: per-tx in-circuit append (concurrency dead-end)](#3a-rejected-per-tx-in-circuit-append)
-3b. [Adopted: stream + checkpoint](#3b-stream--checkpoint-the-adopted-design)
+3. [The on-chain incremental tree (adopted)](#3-on-chain-incremental-tree)
 4. [Concrete diff per layer](#4-concrete-diff)
-5. [Cost model after the change](#5-cost-model)
+5. [Cost model](#5-cost-model)
 6. [DOT-denominated fee estimate on Polkadot Asset Hub](#6-fee-estimate)
 7. [Trade-offs](#7-trade-offs)
-8. [What we are not doing and why](#8-rejected-alternatives)
+8. [Rejected alternatives](#8-rejected-alternatives)
 
 ---
 
 ## 1. What drives gas
 
-Per `buyAndCreate` (original design), breaking down on EVM (real benchmarks)
-and what each maps to under pallet-revive:
+Per `buyAndCreate`, breaking down on EVM and what each maps to under
+pallet-revive's REVM path:
 
-| Step | EVM gas | pallet-revive disposition |
+| Step | What it does | pallet-revive disposition |
 |---|---|---|
-| Selector dispatch + base tx | ~21K | ~21K weight, comparable |
-| `createVerifier.verifyProof` (Groth16, ecPairing precompile) | ~280K | **cheap** — ecPairing is a native precompile on pallet-revive (measurement: 4064 weight units via eth_call) |
-| `transferFrom` to external ERC-20 (CALL + balance/allowance updates) | ~50K | ~5K weight (eth_call measurement on `transfer`: 4615) |
-| `tree.insert(cm)` — 20× `PoseidonT3.hash` via DELEGATECALL + ~20 SSTOREs | **~767K** ([ethresear.ch benchmark, binary depth 20](https://ethresear.ch/t/gas-and-circuit-constraint-benchmarks-of-binary-and-quinary-incremental-merkle-trees-using-the-poseidon-hash-function/7446)) | **the wall** — no Poseidon precompile on pallet-revive; each hash runs as PVM code through an external library call, blowing the per-extrinsic ref_time |
-| `deposited += value`, `minted[epoch] += value`, event | ~50K | comparable |
-| **Total** | **~1.17M EVM gas** | **OOG even with 1T eth-rpc gas hint** |
+| Selector dispatch + base tx | calldata decode, base cost | base inclusion weight |
+| `createVerifier.verifyProof` (Groth16, ecPairing precompile) | one pairing check | **cheap** — ecPairing is a native precompile on pallet-revive |
+| `transferFrom` to external ERC-20 (CALL + balance/allowance updates) | tUSDC pull | cheap — small SSTOREs + CALL |
+| `tree._insert(cm)` — 20× `Poseidon(2)` + frontier/root SSTOREs | the on-chain Merkle insert | **the heaviest component, but well inside budget** under REVM |
+| `deposited += value`, `minted[epoch] += value`, event | bookkeeping | comparable to other SSTORE-heavy ops |
 
-Empirical data from chopsticks-forked Paseo Asset Hub:
+The 20-Poseidon insert is the single biggest line item, but it does **not**
+OOG under pallet-revive's REVM. The earlier design was built on the belief
+that on-chain Poseidon was unusable on pallet-revive; the measurements
+below show that belief was wrong.
 
-| Call | Result | weight units |
-|---|---|---|
-| `createVerifier.verifyProof` (eth_call) | succeeds, returns TRUE | 4064 |
-| `tUSDC.transfer` (eth_call) | succeeds | 4615 |
-| `pool.registerOperator` (eth_call) | succeeds | 4426 |
-| **`PoseidonT3.hash([1, 2])` (eth_call, called directly on the deployed library)** | **OutOfGas** | **>10^12** |
-| `pool.buyAndCreate` (original 20-hash insert) | OutOfGas | — |
-| `pool.buyAndCreate` (with 1-Poseidon hash chain) | OutOfGas | — |
+Empirical data from a chopsticks fork of Asset Hub (REVM), via the e2e
+fee meter (`test/e2e/fees.mjs`):
 
-The bottom three lines are the kicker. **Even a single `PoseidonT3.hash`
-call on pallet-revive exceeds the per-extrinsic ref_time budget.** The
-poseidon-solidity inline assembly (~50 BN254 mulmod ops per round × 65
-rounds, all running as PVM-compiled native code with no precompile fast
-path) is fundamentally too expensive to call on chain — not just 20×, but
-*at all*.
+| Call | Result |
+|---|---|
+| `createVerifier.verifyProof` | succeeds |
+| `tUSDC.transfer` / `approve` | succeeds |
+| `PoseidonT3` (circomlibjs bytecode) deploy + `poseidon([a,b])` | succeeds |
+| `IncrementalMerkleTree` constructor (20 Poseidon zero-hashes) | deploys fine |
+| `buyAndCreate` (full: verify + transferFrom + 20-Poseidon insert) | succeeds |
+| `assign` (verify + two 20-Poseidon inserts) | succeeds |
+| `redeem` (verify + one 20-Poseidon insert) | succeeds |
 
-We confirmed this isn't a per-DELEGATECALL overhead issue (calling
-PoseidonT3 directly OOGs the same way) and isn't fixable by cutting tree
-depth (we tried 20 → 12 → 8; the constructor stopped OOG-ing but
-`buyAndCreate` still OOGs because the bottleneck isn't the *count* of
-Poseidons but that *any* on-chain Poseidon is too expensive).
+The `PoseidonT3` contract is deployed from **circomlibjs** bytecode,
+bit-identical to the circuits' `Poseidon(2)` (`merkle.circom`,
+`ZERO_LEAF=0`). `VoucherPool` calls it through the `IPoseidonT3`
+interface; no external-library linking is needed.
 
-The implication for design: **no Poseidon on chain, period**. The fix is
-not to reduce hash count but to eliminate the on-chain hash function
-entirely.
+The implication for design: **on-chain Poseidon is viable on pallet-revive
+REVM.** There is no need to move the hash off-chain, so the simplest
+correct design — fold the leaf into the tree in the same tx — is also the
+one that ships.
 
 ## 2. Comparable systems
 
-How other privacy stacks handle the same "Merkle-insert is expensive" problem:
+How other privacy stacks handle the "Merkle-insert is expensive" problem:
 
 **Tornado Cash** — accepts the cost. Mainnet deposit is ~1.1 M gas; users
-pay it. Tornado's design separates `deposit` (cheap-ish, just the insert)
-from `withdraw` (verify + payout). Our protocol bundles both into one
-tx (`buyAndCreate` mints + inserts in one go), which makes the wall
-hit sooner.
+pay it. Tornado's design separates `deposit` (the insert) from `withdraw`
+(verify + payout). Our adopted design is the same shape: each user tx pays
+for its own incremental insert, using the Tornado-style frontier
+(`filledSubtrees`) so the per-insert cost is a constant 20 hashes
+regardless of tree fill.
 ([torn.community proposal](https://torn.community/t/proposal-4-tornado-trees-upgrade/636))
 
 **Semaphore v4 (LeanIMT)** — keeps the on-chain tree but eliminates two
-sources of waste: (1) zero-hash siblings are now pass-through (parent = child
-when there's only one child), so insertions early in the tree's life
+sources of waste: (1) zero-hash siblings are now pass-through (parent =
+child when there's only one child), so insertions early in the tree's life
 don't compute zero hashes; (2) tree depth grows dynamically. For our
 steady-state (>1000 vouchers), neither helps much.
 ([Semaphore v4 release notes](https://github.com/semaphore-protocol/semaphore/releases/tag/v4.0.0))
 
-**Aztec / zkSync / Privacy-pool research** — push the tree updates
-**off-chain** into a sequencer that batches transactions, computes the
-new root, and proves the transition with a SNARK. The on-chain contract
-only verifies the batch SNARK and updates one storage slot. This is
-strictly better for throughput but introduces a trust assumption on the
-sequencer (or fraud-proof complexity).
+**Aztec / zkSync / privacy-pool research** — push tree updates **off-chain**
+into a sequencer that batches transactions, computes the new root, and
+proves the transition with a SNARK. The on-chain contract only verifies
+the batch SNARK and updates one storage slot. This is strictly better for
+throughput but introduces a trust assumption on the sequencer (or
+fraud-proof complexity) and adds spend latency — the very indirection the
+adopted design avoids now that on-chain Poseidon is known to fit.
 ([Aztec network architecture](https://nodes.guru/blog/aztec-network-a-hybrid-public-private-zkrollup-bringing-privacy-to-ethereum))
 
-**Per-transaction in-circuit append** — the path of this proposal.
-Each user proves "my new leaf, when appended at index `nextIndex`,
-transitions root `R_old` → `R_new`" inside their existing SNARK. The
-contract stores only `(currentRoot, nextIndex)` and a recent-root ring
-buffer. No on-chain Poseidon. Used in single-user variants of
-zk-payments (e.g., Penumbra's "tournament" component, RISC Zero zkVM
-demos of zk-accounts).
-([Designing recursive SNARK architectures](https://zkdev.com/designing-recursive-snark-architectures-trade-offs-patterns-and-practical-tips/))
+The right primitive for our PoC scale (single-digit demo TPS, no sequencer
+infra, and a per-extrinsic budget that comfortably absorbs the insert) is
+the Tornado-style on-chain incremental tree. It keeps the trustless
+one-shot-tx UX, gives immediate spendability, and needs no off-chain
+checkpointer.
 
-The right primitive for our PoC scale (single-digit demo TPS,
-no sequencer infra) is per-transaction in-circuit append. It keeps the
-trustless one-shot-tx UX we currently have, and the constraint cost is
-modest because the same Poseidon-2 template is already in our circuits.
+## 3. On-chain incremental tree
 
-## 3a. Rejected: per-tx in-circuit append
-
-First instinct was to move the Merkle update inside the SNARK: each user
-proves `oldRoot → newRoot` for their own leaf, contract just SSTOREs the
-new root. Gas-cheap because no on-chain Poseidon, atomicity preserved,
-matches the Aztec / zkSync pattern.
-
-**It dead-ends on concurrency.** The proof binds the specific `oldRoot`
-it was generated against. Two buyers reading the same `(currentRoot,
-nextIndex)` and proving in parallel both compute `newRoot_A` and
-`newRoot_B` against the same `oldRoot`; whichever lands first sets
-`currentRoot = newRoot_A`, and the other's proof is instantly invalid
-(`pool/stale-root`). The loser must refetch state + re-prove (~1 s) +
-resubmit (one block, ~12 s on Asset Hub). At any meaningful concurrency
-the protocol serializes to **1 tx per block** because every proof in
-flight assumes the chain hasn't moved.
-
-This isn't fixable by widening the recent-roots ring buffer: even if the
-contract accepts the user's `oldRoot`, applying their `newRoot` at the
-contract's actual `nextIndex` would mean writing two leaves at the same
-position. The tree only has one leaf per index.
-
-Other systems handle this with:
-- a **sequencer** that hands each prover an assigned slot before they
-  prove (Aztec / zkSync model — needs always-on infra and a round-trip);
-- **recursive proof aggregation** (Nova / Halo2 IVC) — needs a
-  recursion-friendly proving system, Groth16 doesn't fold naturally;
-- **indexed Merkle trees** (Aztec nullifier-tree pattern) — race
-  probability is *almost* zero for random leaves, but still nonzero;
-- **stream + checkpoint** (adopted below) — decouple "commit a leaf"
-  from "update the tree", so user txs are concurrency-safe and the
-  bottleneck moves to the batched checkpoint actor.
-
-For our trust model (a relay actor already exists and is allowed to
-sequence chat-side ops) any of the above is feasible. Stream + checkpoint
-is the simplest to implement and demands no recursion-friendly proving
-system.
-
-## 3b. Stream + checkpoint, the adopted design
-
-### Two layers of on-chain state
+### State
 
 ```
-Stream side (every user tx writes here)        Checkpoint side (batched)
-─────────────────────────────────────            ──────────────────────────
-commitments : mapping(uint32 ⇒ uint256)          checkpointedRoot   : Merkle root
-streamCount : # of leaves streamed               checkpointedCount  : # of leaves included
-                                                 knownRoots[100]    : recent-roots ring buffer
+filledSubtrees : uint256[20]   Tornado frontier (one node per level)
+nextIndex      : uint32        position the next inserted leaf occupies
+_roots[100]    : uint256       recent-roots ring buffer
+currentRootIndex : uint32      index of the most-recent root in the ring
 ```
 
-Each user tx does plain `SSTORE`s — **no on-chain hashing of any kind**.
+There is no stream, no streamCount, no checkpointedRoot/Count. See
+`contracts/contracts/IncrementalMerkleTree.sol`.
 
-`commitments[i]` stores the i-th streamed leaf verbatim. `streamCount`
-is the next free index. The pair gives anyone (including the
-checkpointer) a self-contained on-chain anchor: the cm at position N is
-exactly what's in `commitments[N]`. No collision-resistance assumption
-needed beyond what the SNARK itself uses.
+### Insert
 
-`checkpointedRoot` is the Merkle root of all checkpointed leaves
-(positions `0..checkpointedCount-1`). Spends prove membership against
-this root, not the absolute latest stream state. After a buy/assign/
-redeem, the new commitments are in `commitments[...]` but not yet in the
-tree; the next `checkpoint(...)` call rolls them in.
+`_insert(leaf)` walks the 20 levels from leaf to root: at each level it
+either pairs the new node with its left sibling from `filledSubtrees` (and
+leaves `filledSubtrees[level]` updated for the next insert) or hashes it
+against the precomputed zero for that level, calling
+`poseidonT3.poseidon([left, right])` once per level. After 20 hashes it
+has the new root, advances `currentRootIndex` modulo 100, and writes the
+root into `_roots[currentRootIndex]`. Returns the leaf's index.
 
-### Per-tx weight on pallet-revive (empirical, measured against chopsticks)
+The per-insert cost is a constant 20 `Poseidon(2)` hashes **independent of
+tree depth fill** — the Tornado frontier construction means a full tree
+costs exactly the same as an empty one. So all the fee numbers below hold
+at a full tree.
 
-The empirical cap per extrinsic is ~100 M weight units (where 100 M is
-the eth-rpc gas-unit equivalent that pallet-revive's bridge maps from /
-to substrate weight). Successful txs in the new design land in the
-~50–250 K range — three orders of magnitude under the cap.
+The empty-tree zero hashes are computed in the constructor
+(`zeros[level] = Poseidon(zeros[level-1], zeros[level-1])`, with
+`ZERO_LEAF=0`), matching `scripts/compute-zeros.mjs` and
+`circuits/src/merkle.circom`. The empty-tree root sits at ring-buffer
+index 0.
 
-| Op | What it does on chain | Status on chopsticks |
-|---|---|---|
-| `buyAndCreate` | ecPairing verify + transferFrom + 1 SSTORE (cm) + 4 small SSTOREs + emit | ✓ passes (e2e) |
-| `assign` | ecPairing verify + nullifier SSTORE + 2 SSTOREs (cmDest, cmChange) + 1 SSTORE (streamCount) + emit | ✓ passes |
-| `redeem` | ecPairing verify + nullifier SSTORE + 1 SSTORE (cmChange) + 2 SSTOREs (credit, spent) + emit | ✓ passes |
-| `checkpoint` | 1 SLOAD (cm) + ecPairing verify + 3 SSTOREs (root, count, ring buffer) + emit | ✓ passes |
-| `withdraw` | 2 SSTOREs (credit, withdrawn) + tUSDC.transfer + emit | ✓ passes |
+### Membership and the root ring buffer
 
-Per-op weight is dominated by the ecPairing verify (~4 K weight) plus
-the per-SSTORE cost. Even the heaviest op (assign with 2 commitments
-written and the nullifier SSTORE) lands well inside the cap.
+Spends (`assign` / `redeem`) prove Merkle membership against a root that
+the contract accepts iff it matches any of the last 100 roots
+(`isKnownRoot`). Because inserts advance the root on every user tx, a
+proof built a few txs ago against a then-current root still verifies as
+long as it is within the last 100 roots — this is what makes concurrent
+spends practical without a sequencer or a stale-root retry loop.
 
-### Checkpoint proof
+### Spendability
 
-The checkpoint SNARK proves an atomic single-leaf transition (BATCH=1
-for the PoC; B≥8 in production):
-
-```
-public:  oldRoot, newRoot, oldCount, newCount, cm
-private: appendPath[20]      // canonical sibling path
-
-constraints:
-  1. newCount == oldCount + 1
-  2. MerkleProof(0,  appendPath, bits(oldCount)) == oldRoot   (path canonical)
-  3. MerkleProof(cm, appendPath, bits(oldCount)) == newRoot   (transition)
-```
-
-The on-chain anchor is `cm` itself: the contract reads
-`commitments[oldCount]` via SLOAD and passes it as the public input. The
-checkpointer cannot sneak in fake commitments — the SNARK only verifies
-what the contract reads.
-
-Constraint count (BATCH=1, depth 20):
-- 2 Merkle-proof checks: 2 × 20 Poseidon-2 ≈ 41 × 213 ≈ 8.7 K
-- Glue + Num2Bits: ~1 K
-- **Total: ~10 K**
-
-Fits ptau-15 (~16 K coverage in Groth16). PoC uses ptau-17 to share one
-file across all circuits; setup is fast.
-
-### Batching for production
-
-The PoC uses BATCH=1 so each checkpoint covers one commitment. That
-gives no amortization — checkpointer pays one Groth16 verify per
-streamed leaf. Production should bump to B≥8:
-
-| BATCH | Constraints | ptau | Amortization |
-|---|---|---|---|
-| 1 (PoC) | ~10 K | ptau-15 | none — 1 SNARK verify per leaf |
-| 4 | ~40 K | ptau-17 | 4× cheaper per leaf |
-| 8 | ~80 K | ptau-17 | 8× cheaper per leaf |
-| 16 | ~160 K | ptau-18 | 16× cheaper per leaf |
-
-The contract signature changes to `uint256 newRoot, uint32 newCount,
-uint256[B] cm, ...` (cm becomes an array) and the contract loops
-SLOAD'ing each `commitments[oldCount+i]` to assemble the public-input
-batch. Circuit chains intermediate roots `treeRoot[i+1] = newMP[i].root`
-the same way the existing PoC code does for the single step.
-
-### Spendability latency
-
-A note is spendable from one checkpoint after its creation. The relay,
-which already sequences chat-side ops, runs an eager checkpointer
-(trigger on batch-full OR a configurable timer). At Polkadot Asset
-Hub's 2-second block time this is ~2 s in the limit (one block);
-typically 2–6 s in practice for low-traffic chains where the timer
-fires before the batch fills.
-
-### Who runs the checkpointer
-
-Anyone can — `checkpoint(...)` is permissionless. The relay operator
-naturally does it because they want low spend latency for chat-side
-ops. If no one checkpoints, mints still work (they just accumulate in
-the stream) but spends queue. Funds are not at risk — the on-chain
-commitment log is self-contained truth; any future checkpointer can
-roll forward.
+A note is spendable as soon as the tx that created it lands: its
+commitment is in the tree and its root is in the ring buffer immediately.
+There is no checkpoint cycle, so no spend latency beyond block inclusion.
 
 ## 4. Concrete diff per layer
 
 ### Contracts (`contracts/contracts/`)
 
-- `IncrementalMerkleTree.sol` → replaced by `StreamAndRootRing.sol`.
-  Drops frontier/zeros/filledSubtrees and the entire `poseidon-solidity`
-  dependency. Stores `mapping(uint32 ⇒ uint256) commitments` indexed by
-  stream position, `streamCount`, and a 100-slot `roots` ring buffer
-  that only advances on `checkpoint(...)`.
+- `IncrementalMerkleTree.sol`: Tornado-frontier append-only tree (depth
+  20). Holds `filledSubtrees[20]`, `nextIndex`, the 100-slot `_roots` ring
+  buffer, and `currentRootIndex`. Exposes `_insert`, `isKnownRoot`,
+  `getLatestRoot`. Takes an `IPoseidonT3` in its constructor and calls it
+  for every hash.
+- `IPoseidonT3.sol`: minimal interface (`poseidon(uint256[2]) → uint256`)
+  for the externally-deployed Poseidon(2) contract.
 - `VoucherPool.sol`:
-  - `buyAndCreate` / `assign` / `redeem` no longer call `tree.insert`.
-    Each calls `state.appendStream(cm)` which does **one SSTORE** per
-    commitment plus one SSTORE for the count. No hashing.
-  - Spend proofs (assign / redeem) bind to `oldRoot ∈ knownRoots` —
-    i.e. a *checkpointed* root, not the latest stream state.
-  - New `checkpoint(...)` (permissionless). Reads `commitments[oldCount]`
-    via SLOAD and passes it as the SNARK's `cm` public input — the
-    SNARK then proves the tree transition over exactly that cm.
-- **No `PoseidonT3` (or any hash function) on chain**. The whole
-  poseidon-solidity dependency is removed. The constructor's only
-  Merkle root constant is the pre-computed empty-tree root at depth 20,
-  hard-coded as a literal.
+  - `buyAndCreate` calls `_insert(cm)` (one leaf).
+  - `assign` calls `_insert(cmDest)` then `_insert(cmChange)` (two leaves);
+    both are spendable immediately.
+  - `redeem` calls `_insert(cmChange)` (one leaf).
+  - Spend proofs bind to a root accepted by `isKnownRoot` (any of the last
+    100 roots).
+  - **No `checkpoint()`**, no stream append, no checkpoint public-input
+    layout.
+- `PoseidonT3` is deployed separately from **circomlibjs** bytecode (raw,
+  no ABI) and passed into `VoucherPool`'s constructor via the
+  `IncrementalMerkleTree` base. No `poseidon-solidity` dependency, no
+  external-library linking.
 
 ### Circuits (`circuits/src/*.circom`)
 
-- `create.circom`, `assign.circom`, `redeem.circom`: **unchanged from
-  baseline**. Spend proofs still prove membership against `root` exactly
-  as today — only now `root` is interpreted as a checkpointed root
-  rather than the latest tree state.
-- New `checkpoint.circom`:
-  - Public inputs: `oldRoot, newRoot, oldCount, newCount, cm`.
-  - Private inputs: `appendPath[depth]` (canonical sibling path).
-  - Constraints: (i) `newCount == oldCount + 1`; (ii) verify
-    `MerkleProof(0, appendPath, bits(oldCount)) == oldRoot` (path
-    canonical); (iii) verify
-    `MerkleProof(cm, appendPath, bits(oldCount)) == newRoot` (transition).
-
-Constraint count (BATCH=1, depth 20): ~10 K, fits ptau-15 with room.
-PoC build uses ptau-17 to share one file across all circuits.
-
-For production B=8: add `cm[B]` + `appendPath[B][depth]`, chain
-intermediate roots — ~80 K constraints, needs ptau-17.
+- `create.circom`, `assign.circom`, `redeem.circom`: unchanged. Spend
+  proofs prove membership against `root` exactly as before — `root` is a
+  ring-buffer root.
+- `merkle.circom`, `commitment.circom`: shared templates (`Poseidon(2)`,
+  depth 20, `ZERO_LEAF=0`) — kept in sync with the contract's hashing.
+- **There is no `checkpoint.circom`** and no checkpoint verifier.
 
 ### Core package (`packages/core/src/`)
 
-- `merkle.js`: add `appendPath(insertIndex)` — returns the canonical
-  sibling path for inserting at `insertIndex` (filledSubtrees on the
-  left, pre-computed zeros on the right). Already had `proof(leafIndex)`
-  for spends — keep that.
-- New `checkpoint.js`: `buildCheckpointInput({mirror, cm, oldCount})`
-  returns the input shape for `proveCheckpoint(...)`.
-- `proof.js`: add `proveCheckpoint(input)`.
+- Exports `poseidonT3Bytecode` (circomlibjs deploy bytecode) used by the
+  deploy script to instantiate the on-chain Poseidon(2).
+- `merkle.js`: mirror tree used to build spend witnesses
+  (`proof(leafIndex)`). No checkpoint/append-path helper is needed.
 
 ### Test harness + dapps
 
-- `test/e2e/flow.test.mjs`: between each user tx and the next
-  membership-requiring tx, call `pool.checkpoint(...)`. The harness
-  has a `drainCheckpoints()` helper that loops over `pendingStream`
-  (cm not yet checkpointed) and submits one `checkpoint(...)` tx per
-  entry.
-- Dapps: purchaser unchanged (still just submits buyAndCreate). Chat
-  reads `checkpointedCount` and waits if its target note hasn't been
-  checkpointed yet. Relay gains a checkpointer mode (eagerly batches +
-  submits).
+- `test/e2e/deploy.mjs`: deploys `PoseidonT3` from `poseidonT3Bytecode`,
+  then the three verifiers, then `VoucherPool` wired to the Poseidon
+  address. The **same EVM bytecode** is used for both `TARGET=hardhat` and
+  `TARGET=chopsticks`; the only difference is that chopsticks points at the
+  eth-rpc bridge and passes an explicit `gasLimit`. No resolc, no
+  `artifacts-pvm`, no library linking.
+- `test/e2e/flow.test.mjs`: buy → assign → redeem → withdraw with no
+  checkpoint step between them — every note is spendable as soon as its tx
+  lands.
+- `test/e2e/fees.mjs`: reads `system.account.{free,reserved,frozen}` before
+  and after each tx and reports the inclusion fee and gas per action.
+- Dapps: purchaser submits `buyAndCreate`; chat/relay spend immediately
+  after creation. No checkpointer mode.
 
-## 5. Cost model after the change
+## 5. Cost model
 
-Per user tx on pallet-revive. The empirically-measured per-extrinsic
-ceiling is ~100 M weight units (eth-rpc gas-unit-equivalent), and from
-direct measurements: `verifyProof` (Groth16, ecPairing precompile) =
-4 K, `transfer` = 5 K, single SSTORE ≈ ~5 K. With no on-chain Poseidon
-the heaviest op is well clear of the ceiling.
+Per user tx on pallet-revive REVM. The 20-Poseidon insert is the dominant
+component but lands well inside the per-extrinsic budget; the heaviest op
+(`assign`, two inserts) is still an order of magnitude under the per-block
+normal-dispatch budget (~4.69 M gas; see §6). Measured gas (chopsticks
+fork, REVM):
 
-| Step | `buyAndCreate` | `assign` | `redeem` |
-|---|---|---|---|
-| Selector + decode | ~21 K | ~21 K | ~21 K |
-| Groth16 verify (ecPairing precompile) | ~4 K | ~4 K | ~4 K |
-| `transferFrom` external CALL | ~5 K | — | — |
-| Commitments SSTORE | 1 × ~5 K | 2 × ~5 K | 1 × ~5 K |
-| Bookkeeping SSTOREs (streamCount, nullifier, credit, deposited, minted…) | ~25 K | ~25 K | ~30 K |
-| Emit event | ~5 K | ~5 K | ~5 K |
-| **Total per user tx** | **~65 K** | **~85 K** | **~70 K** |
-| Headroom vs 100 M ceiling | ~1500× | ~1200× | ~1400× |
+| Op | What it does on chain | Gas (avg) |
+|---|---|---:|
+| `approve` (tUSDC) | ERC-20 allowance SSTORE | ~3,907 |
+| `buyAndCreate` | verify + transferFrom + 1 insert (20 Poseidon) + bookkeeping | ~16,079 (cold 21,404 / warm 10,754) |
+| `assign` | verify + nullifier + 2 inserts (40 Poseidon) | ~25,154 |
+| `redeem` | verify + nullifier + 1 insert (20 Poseidon) + credit | ~18,319 |
+| `withdraw` | credit/withdrawn SSTOREs + tUSDC.transfer | ~3,255 |
 
-Per `checkpoint(...)` (paid by checkpointer, PoC's BATCH=1):
+Per-tx cost is **independent of tree depth/fill** — the Tornado frontier
+makes every insert a constant 20 hashes — so these numbers hold at a full
+tree.
 
-| Step | Weight |
-|---|---|
-| SLOAD (`commitments[oldCount]`) | ~3 K |
-| Groth16 verify (ecPairing) | ~4 K |
-| State updates (root, count, ring buffer) | ~25 K |
-| Emit event | ~5 K |
-| **Total** | **~40 K** |
-
-Amortized per user tx (BATCH=1): 1 checkpoint per commitment streamed
-≈ 1.3 checkpoints per user tx average (buy adds 1 leaf, assign 2,
-redeem 1). At B=8 in production: ~5 K weight extra per user tx of
-"checkpointer share".
-
-These are empirical-passing numbers — all 13/13 e2e steps land on
-chopsticks-forked Paseo Asset Hub in real ~10–20 s wall time per block
-(matching real Paseo block production), with no OOG anywhere.
-
-Proving time:
-- Per user tx (assign): unchanged from baseline, ~400 ms desktop / ~1 s
-  mobile p50. The spend circuits did not change.
-- Checkpoint (BATCH=1, ~10 K constraints): ~800 ms desktop. BATCH=8
-  in production: ~6 s. Runs in the relay's background loop, off the
-  user's critical path.
-
-### What about storage_deposit?
-
-Each `SSTORE` to a new `mapping` slot triggers pallet-revive's
-`storage_deposit_factor × bytes` lockup, paid by the tx caller. For a
-32-byte commitment slot on Asset Hub this is ~0.003 DOT (per the
-`100 MILLICENTS/byte` constant). The locked deposit is **refundable**
-when the slot is cleared.
-
-For the PoC we don't clear `commitments[i]` after checkpoint, so the
-per-mint storage lockup is permanent. Two production paths:
-
-1. **`SSTORE 0` (clear) the commitment in `checkpoint(...)`** once the
-   tree includes it — refunds the deposit to the original caller within
-   one checkpoint cycle (seconds). Adds one SSTORE-clear per leaf in the
-   checkpoint tx.
-2. **Skip the SSTORE entirely** by reading cm from the event log
-   off-chain; the checkpointer asserts `keccak256(emit) == ...`. Loses
-   on-chain anchor; depends on event indexer trust.
-
-Option 1 is the cleanest fit; the PoC contract is one TODO away from
-implementing it. The empirical e2e ran with the permanent-lockup model
-(no clearing) and still passed — the deposit didn't break anything on
-our short-lived chopsticks run.
+Proving time (off-chain, unchanged from baseline): per spend (`assign` /
+`redeem`) ~400 ms desktop / ~1 s mobile p50. The spend circuits did not
+change.
 
 ## 6. Fee estimate
 
-Translating the weight numbers into actual DOT cost on Polkadot Asset Hub
+### Measured — chopsticks fork of Polkadot/Paseo Asset Hub (REVM)
+
+We ran the full end-to-end flow against a chopsticks fork of Asset Hub
+(pallet-revive live since January 2026) through the e2e fee meter
+(`test/e2e/fees.mjs`), reading `system.account.{free,reserved,frozen}`
+before and after each transaction. Empirically the storage deposit is 0 —
+pallet-revive folds state-write cost into the inclusion fee rather than
+locking a refundable `reserved` deposit — so the user-facing cost is
+exactly the inclusion fee. The effective rate is **fee ≈ gas × 1e-6
+PAS/DOT**.
+
+| # | Tx | gas | Fee (DOT/PAS) |
+|---|---|---:|---:|
+| 1 | `approve` (tUSDC, amortized) | ~3,907 | ~0.004 |
+| 2 | `buyAndCreate` | ~16,079 | ~0.016 |
+| 3 | `assign` | ~25,154 | ~0.025 |
+| 4 | `redeem` | ~18,319 | ~0.018 |
+| 5 | `withdraw` | ~3,255 | ~0.003 |
+| **Per complete voucher lifecycle** | buy + assign + redeem + withdraw + amortized approve | **~110,190** | **≈ 0.110** |
+
+There are **no checkpoint rows** — the checkpoint extrinsic no longer
+exists.
+
+**Throughput.** At ~110,190 gas all-in per voucher lifecycle and a
+per-block Normal-dispatch budget of ~4,687,500 gas (0.5 s ref_time × 75% ÷
+80,000 ps/gas), the protocol fits **~42 full voucher flows per block** if
+it owned the entire normal-dispatch class (it doesn't — the chain also
+serves XCM, asset transfers, governance, etc., so realistic share is a
+fraction). Well above plausible community-credits demand.
+
+Because each insert is a constant 20 Poseidon hashes (Tornado frontier),
+these fees do **not** grow as the tree fills — they hold at a full tree.
+
+### Fee constants (reference)
+
+Polkadot Asset Hub fee model
 ([polkadot-fellows/runtimes constants](https://github.com/polkadot-fellows/runtimes/blob/main/system-parachains/constants/src/polkadot.rs)):
 
 | Constant | Value |
 |---|---|
 | 1 DOT | 10^10 plancks |
 | `TRANSACTION_BYTE_FEE` | 50,000 plancks/byte (MILLICENTS/2) |
-| `WeightToFee` coefficient | `CENTS / (200 × ExtrinsicBaseWeight.ref_time)` |
-| `ExtrinsicBaseWeight.ref_time` (Substrate default) | ~125 µs = 1.25×10^8 ps |
-| → per-picosecond rate | 10^8 / (200 × 1.25×10^8) ≈ **4×10⁻³ plancks/ps** |
-| → per-second rate | 10^12 × 4×10⁻³ = 4×10⁹ plancks = **0.4 DOT/sec ref_time** |
-| `MaxEthExtrinsicWeight` (per-tx ceiling, ref_time) | 50% × 0.5 s = **0.25 s** |
-| pallet-revive `GasScale` (1 EVM gas → ps) | **80,000 ps/gas** |
-
-### Worst case — tx succeeds at the per-extrinsic ceiling
-
-| Component | Quantity | Plancks | DOT |
-|---|---|---|---|
-| ref_time (full 0.25 s budget) | 2.5×10¹¹ ps × 4×10⁻³ | 10⁹ | **0.10 DOT** |
-| length fee (~550 byte tx — proof + args) | 550 × 50,000 | 2.75×10⁷ | 0.003 DOT |
-| proof_size (~30 KB PoV) | order-of-magnitude | ~10⁵–10⁶ | <0.001 DOT |
-| base fee | — | small | <0.001 DOT |
-| **Inclusion fee total** | | | **≈ 0.10 DOT** |
-
-At DOT ≈ $4: **~$0.40 per ceiling-grazing tx**. At DOT ≈ $10: **~$1.00**.
-Comparable Ethereum mainnet 1M-gas tx at 20 gwei: ~$5–50.
-
-### Measured — chopsticks fork of Polkadot Asset Hub (mainnet runtime)
-
-The above (worst-case ceiling) is a theoretical bound. To get real numbers
-we ran the full end-to-end flow (`pnpm --filter test/e2e test` with
-`TARGET=chopsticks`, `CHAIN=polkadot`) against a chopsticks fork of
-**mainnet Polkadot Asset Hub** (`pallet-revive` live since January 2026),
-instrumented to read `system.account.{free, reserved, frozen}` before
-and after each transaction. The full flow comprises 9 user-facing
-transactions. Blockspace fractions assume the Normal-dispatch budget
-of `MAX_BLOCK_WEIGHT × NORMAL_DISPATCH_RATIO / GasScale` ≈ 4,687,500
-gas per block (0.5 s ref_time × 75% / 80 K ps/gas).
-
-| # | Tx | Caller | eth-rpc gas | Inclusion fee (DOT) | Block fraction | Fits per block |
-|---|---|---|---:|---:|---:|---:|
-| 1 | `approve` (tUSDC) | buyer | 5,048 | 0.00404 | 0.108% | 928 |
-| 2 | `buyAndCreate` | buyer | 19,568 | 0.01565 | 0.418% | 239 |
-| 3 | `checkpoint` #1 | relay | 11,884 | 0.00951 | 0.254% | 394 |
-| 4 | `assign` | relay | 16,078 | 0.01286 | 0.343% | 291 |
-| 5 | `checkpoint` #2 (`cmDest`) | relay | 8,585 | 0.00687 | 0.183% | 546 |
-| 6 | `checkpoint` #3 (`cmChange`) | relay | 8,585 | 0.00687 | 0.183% | 546 |
-| 7 | `redeem` | relay | 19,716 | 0.01577 | 0.421% | 237 |
-| 8 | `checkpoint` #4 (redeem `cmChange`) | relay | 8,585 | 0.00687 | 0.183% | 546 |
-| 9 | `withdraw` | relay | 6,489 | 0.00519 | 0.138% | 722 |
-| **Total per voucher flow** | | | **104,538** | **0.0836** | **2.23%** | **44** |
-
-**All-in cost per voucher** (one buy + one assign + one redeem + one
-withdraw with the surrounding BATCH=1 checkpoints): **0.0836 DOT**
-≈ **$0.109 at DOT = \$1.30** (current price). At BATCH=8 (production
-checkpointer batches four streamed leaves into one tx), per-voucher
-total drops to **~0.061 DOT ≈ \$0.079**.
-
-**Throughput ceiling.** 44 complete voucher flows per **2-second**
-block (Polkadot Asset Hub adopted 2 s block time in v2.0.5, January
-2026, via elastic scaling on 3 cores) ≈ **22 vouchers/sec sustained**,
-assuming the protocol owns the entire Normal-dispatch class of the
-chain (which it doesn't — the chain serves XCM, asset transfers,
-governance, etc., so realistic share is a small fraction). The
-single-operation bottleneck is `buyAndCreate` and `redeem` at
-~240/block each ≈ **120 buys/sec or 120 redeems/sec** if either
-dominated the block. Well above plausible community-credits demand.
-
-Note: the per-block weight budget (`MAX_BLOCK_WEIGHT.ref_time = 0.5 s`,
-Normal-dispatch ratio 75%) is unchanged from the 6-second-block era;
-elastic scaling delivers extra throughput by producing N blocks per
-relay-block window across N cores, each with the same weight budget.
+| pallet-revive `GasScale` (1 EVM gas → ps) | 80,000 ps/gas |
+| per-block Normal-dispatch gas budget | 0.5 s × 75% ÷ 80,000 ps/gas ≈ 4,687,500 gas |
 
 ### Reserved and frozen balances
 
-The measurement reads all three substrate balance fields:
+Across the flow, **`reserved` delta = 0** and **`frozen` delta = 0**.
+pallet-revive on Asset Hub does not lock the caller's balance via
+`reserved` or `frozen`; the full cost of state writes (including the 20
+Poseidon hashes per insert) is rolled into the inclusion fee, debited from
+`free`. The user-facing all-in cost is exactly the inclusion fee — no
+separate up-front deposit to fund, no refund cycle to track.
 
-- `free`: the spendable portion that pays fees.
-- `reserved`: locked by `pallet_balances::Hold` (e.g. for storage
-  deposits in some pallet configurations).
-- `frozen`: locked by `pallet_balances::Freeze` (vesting, staking,
-  governance).
-
-Across all 9 transactions of the flow, **`reserved` delta = 0** and
-**`frozen` delta = 0**. Empirically:
-
-- pallet-revive on Polkadot Asset Hub does *not* lock the caller's
-  balance via the `reserved` or `frozen` mechanisms. The full cost of
-  state writes is rolled into the inclusion fee (which is debited from
-  `free`).
-- The user-facing all-in cost is exactly the inclusion fee — no
-  separate up-front deposit to fund, no refund cycle to track.
-- Frozen-balance interactions (e.g. a buyer who has DOT locked in
-  vesting or governance) do not interfere with the protocol — the
-  per-tx fee comes from the unfrozen portion.
-
-This also means our earlier "storage deposit ~0.003 DOT per cm" estimate
-based on `polkadot-fellows/runtimes` deposit constants was inapplicable
-to pallet-revive specifically. Those constants govern pallets that *do*
-use `reserved` (e.g. `pallet_assets`, `pallet_identity`); pallet-revive
-takes a different route.
-
-### Empirical fee rate
-
-Total fee / total gas: 836,304,000 plancks ÷ 104,538 gas =
-**~8,000 plancks per eth-rpc gas unit** on the live Polkadot Asset Hub
-runtime. This is the load-bearing number for cost projection of any new
-operation — multiply the operation's measured gas (or `eth_estimateGas`
-output) by 8,000 / 10¹⁰ = **8×10⁻⁷ DOT per gas unit**, then by current
-DOT/USD to get a USD fee.
-
-The earlier back-of-envelope estimate (4×10⁻³ plancks per picosecond ×
-80 K ps per gas unit = 320 plancks per gas) was off by ~25×. The real
-runtime applies length fees and a different `WeightToFee` coefficient
-than what the constants suggested in isolation; the measured rate
-supersedes the estimate.
-
-### Surprises from the measurement
-
-**Checkpoint cost is ~⅓ of total flow cost.** Four BATCH=1 checkpoints
-total 0.0301 DOT (36% of the all-in). Switching to BATCH=8 would
-amortize four checkpoints into one (~0.007 DOT instead of 0.030 DOT),
-dropping per-voucher total to **~0.061 DOT** ≈ $0.079 at DOT = \$1.30
-— about 27% cheaper.
-
-**Per-voucher cost vs voucher face value.** At 0.084 DOT all-in per
-voucher (BATCH=1, \$0.109 today) or 0.061 DOT (BATCH=8, \$0.079
-today), the protocol is economically viable for vouchers ≥ ~\$1 with
-modest margin and very comfortable for vouchers ≥ \$5. Sub-\$1
-vouchers are borderline; this sets a practical lower bound on the
-denomination set $\mathcal{D}$ in the fixed-denomination design
-(Section~\ref{sec:amount-privacy}).
-
-### Worst case revisited
-
-The original worst-case estimate of 0.10 DOT (theoretical per-extrinsic
-ceiling) is still the upper bound and still ~1.2× the measured all-in
-voucher cost. The actual operations land 1–2 orders of magnitude under
-the per-tx ceiling, leaving plenty of headroom for circuit growth.
-
-### Storage deposit and frozen balances
-
-Empirically (see "Reserved and frozen balances" above), per-user txs
-on Polkadot Asset Hub mainnet runtime show **zero** delta in both
-`reserved` and `frozen` balance dimensions. pallet-revive rolls
-storage costs into the inclusion fee rather than locking them as a
-refundable deposit. User-facing cost = inclusion fee, full stop.
-
-The contract-creation deposit (one-time, when `VoucherPool` is
-deployed) is a separate matter and is paid by the deployer, not by
-per-tx callers.
+The contract-creation deposit (one-time, when `VoucherPool` and
+`PoseidonT3` are deployed) is paid by the deployer, not by per-tx callers.
 
 ### What's not included above
 
 - **`targeted_fee_adjustment`** multiplier: rises with sustained
-  congestion (default 1×, can hit 2–4× under load). The chopsticks
-  fork inherits the current mainnet adjustment value at the forked
-  block; under load the per-tx fees scale linearly.
-- A live Polkadot Asset Hub deployment will see per-block gas-price
-  adjustments that the static fork doesn't reproduce.
-
-### Why this matters for the protocol
-
-The original 20-Poseidon-per-insert design OOGs at >100 M weight units
-per tx and never lands. The stream+checkpoint redesign brings the
-measured per-voucher cost to **0.084 DOT (BATCH=1) or 0.061 DOT (BATCH=8)**
-≈ **\$0.11 or \$0.08 at DOT = \$1.30**. That makes voucher denominations
-of \$1 and up economically viable. The full voucher flow occupies just
-~2.2% of a Polkadot Asset Hub block (~44 flows/block, ~22 flows/second
-at the chain's 2-second block time) — well above plausible protocol
-demand for community credits.
+  congestion (default 1×, can hit 2–4× under load). The chopsticks fork
+  inherits the mainnet adjustment value at the forked block; under load
+  per-tx fees scale linearly.
+- A live deployment will see per-block gas-price adjustments the static
+  fork doesn't reproduce.
 
 ## 7. Trade-offs
 
-**Spend latency = checkpoint interval.** A note minted at time `t` can
-only be assigned/redeemed once `checkpoint(...)` has rolled its
-commitment into the tree. With an eager checkpointer (trigger on
-batch-full OR configurable timer), bound to a few seconds. Worst case:
-no checkpointer is running → no spends are possible (existing notes are
-unaffected; just queued). The relay operator naturally has incentive
-to checkpoint because they want low spend latency for the chat-side ops
-they relay.
+**Higher per-tx gas, simpler state, immediate spendability.** Folding the
+insert into the user tx makes each tx pay for its own 20 Poseidon hashes
+rather than deferring them to a batched checkpointer. In exchange the
+protocol drops the entire stream + checkpoint machinery (stream mapping,
+checkpoint extrinsic, checkpoint circuit/verifier, checkpointer daemon,
+frontier-in-SNARK) and notes become spendable the instant their tx lands.
+The higher per-tx gas was validated to run under pallet-revive REVM with
+ample headroom (§§5–6).
 
-**Checkpointer liveness is a soft dependency.** If no one ever
-checkpoints, mints still work (they just append to `commitments[...]`)
-but spends stall. Funds aren't at risk — the on-chain commitment array
-is self-contained truth and any future checkpointer can roll forward.
-We don't run on a checkpoint-or-nothing model; the stream is
-permissionlessly observable.
+**No checkpointer liveness dependency.** Because there is no checkpoint
+step, there is no actor whose absence stalls spends. Every note is
+spendable as soon as its creating tx is included.
 
-**Per-mint storage lockup.** Each streamed cm locks ~0.0032 DOT of the
-caller's balance under pallet-revive's `storage_deposit` rule (32 bytes
-× `100 MILLICENTS/byte`). PoC leaves it permanent; production should
-add SSTORE-to-zero on cm in `checkpoint(...)` to refund within a
-checkpoint cycle. See §6 "Storage deposit" for numbers.
+**Concurrency via the root ring buffer.** Spends prove membership against
+any of the last 100 roots, so a proof built against a slightly-stale root
+still lands. Past 100 intervening inserts a spend proof must be rebuilt
+against a fresher root — a non-issue at PoC scale and tunable via
+`ROOT_HISTORY_SIZE`.
 
-**Indexer correctness becomes load-bearing for the checkpointer.** The
-checkpointer reads each cm via SLOAD on `commitments[oldCount]` —
-trivial. But it also needs to rebuild the off-chain Merkle tree to
-compute the canonical sibling path. That mirror tree is built from
-`VoucherCreated`/`Assigned`/`Redeemed` events. If the indexer is wrong
-about the tree, the checkpoint proof's `oldRoot` won't match
-`checkpointedRoot` and the tx reverts. No funds at risk; checkpointer
-re-syncs and retries.
+**On-chain Poseidon cost.** The 20 hashes per insert are the dominant gas
+line item. The Tornado frontier keeps that cost constant regardless of
+tree fill, and measurement shows it fits comfortably inside
+pallet-revive's per-extrinsic budget — so the cost is bounded and
+predictable rather than a scaling risk.
 
-**No on-chain tree state for debug.** Inspecting "is leaf N at position
-N in the tree" requires running the indexer. The on-chain
-`checkpointedRoot` is a single hash; you can't recover the leaf set
-from it. Acceptable — the dapps already need the indexer to build
-witnesses.
-
-**ZK artifact size grows for the checkpointer.** The new checkpoint
-zkey is ~10 MB at BATCH=1 (~10 K constraints), ~25 MB at BATCH=8
-(~80 K). Only the checkpointer (relay) needs to host + use it;
-end-user dapps are unchanged.
-
-**Reorg sensitivity.** A re-org that drops a `VoucherCreated` tx also
-drops the matching `commitments[N]` write and decrements `streamCount`,
-so a partially-built checkpoint becomes invalid. Standard solution:
-checkpointer waits for finality (~6 blocks on Asset Hub) before
-including events in its batch. Adds latency proportional to finality
-lag.
+**No on-chain leaf set for debug.** The on-chain root is a single hash;
+recovering "is leaf N at position N" requires the off-chain mirror tree
+the dapps already build for witnesses. Acceptable.
 
 ## 8. Rejected alternatives
 
-**Splitting `buyAndCreate` into commit + finalize.** Explicitly out of
-scope per the requirement. Would lose atomicity, require a per-buyer
-nonce, and create a front-running window between the two txs.
+**Stream + checkpoint (mini-rollup).** The previously-adopted design:
+user txs only `SSTORE` their commitment into an on-chain stream, and a
+permissionless `checkpoint()` extrinsic later folds streamed leaves into
+the root inside a SNARK (Tornado frontier proven in-circuit, batches up to
+B_MAX=8). Its sole motivation was avoiding on-chain Poseidon, believed to
+OOG pallet-revive. **Measurement disproved the premise** — the full
+20-Poseidon insert runs fine under REVM — so the indirection bought
+nothing but complexity and spend latency. Dropped entirely: no stream, no
+checkpoint extrinsic, no checkpoint circuit/verifier, no checkpointer
+daemon, no frontier-in-SNARK.
 
-**Per-tx in-circuit append.** Detailed analysis in §3a above. Each
-user's proof binds to a specific `oldRoot`, so concurrent submissions
-serialize to ~1 tx per block. Fine for demos, dead for any real load.
-The stream+checkpoint design escapes this by decoupling "commit a leaf"
-from "update the tree" so user txs no longer compete for tree state.
+**Splitting `buyAndCreate` into commit + finalize.** Out of scope per the
+requirement. Would lose atomicity, require a per-buyer nonce, and create a
+front-running window between the two txs.
 
-**On-chain Poseidon hash chain as the stream anchor.** First attempt at
-stream+checkpoint anchored each leaf via `streamHash = Poseidon(prev,
-cm)` — one Poseidon call per user tx, much cheaper than the original
-20-hash insert. **Empirically OOGs** on pallet-revive: a single
-`PoseidonT3.hash` call alone exceeds the per-extrinsic weight budget.
-The current design uses plain `SSTORE` of cm into a mapping instead.
-Trade-off: per-mint `storage_deposit` lockup of ~0.003 DOT (see §6,
-§7), refundable if checkpoint clears the slot.
-
-**Cutting tree depth to 8 or 4.** Tried 20 → 12 → 8 in
-[`chopsticks/README.md`](../chopsticks/README.md); the constructor
-stopped OOG-ing but `buyAndCreate` still OOGs at depth 8. The bottleneck
-isn't the count of Poseidon calls — it's that pallet-revive can't run
-*any* meaningful number of Poseidon DELEGATECALLs alongside other work
-in one extrinsic.
-
-**Adding a Poseidon precompile to pallet-revive.** The right long-term
-fix for the whole Polkadot ZK ecosystem, but a runtime change — out of
-PoC scope. Worth raising upstream as a Polkadot Fellowship RFC; an EVM
-counterpart proposal exists as [EIP-5988](https://github.com/ethereum/EIPs/pull/5988/files).
+**Per-tx in-circuit append.** Move the Merkle update inside the SNARK
+(buyer proves `oldRoot → newRoot`, contract just SSTOREs the new root).
+Gas-cheap, but every proof binds to the specific `(oldRoot, nextIndex)`
+the prover saw, so concurrent submissions serialize to ~1 tx per block.
+The on-chain insert with the root ring buffer avoids this: inserts are
+contract-ordered, and stale-root spends still verify against the last 100
+roots.
 
 **Sequencer / batched-rollup model (Aztec-style).** Strictly better at
-high TPS than stream+checkpoint, but requires the sequencer to be on
-the critical path of every user submission (round-trip before proving).
-The stream+checkpoint model lets users submit freely and only requires
-a checkpointer for spend-latency, which is a softer dependency.
+high TPS, but puts the sequencer on the critical path of every submission
+(round-trip before proving) and adds spend latency. Unnecessary now that
+on-chain insert fits the budget.
 
 **Indexed Merkle Tree (Aztec nullifier-tree style).** Insertion's
-"neighbor" depends on the existing leaf values; concurrent inserts on
-random commitments collide very rarely. Pure in-circuit change, no
-new infra. Rejected because (a) collision is non-zero — bad for any
-sustained load — and (b) the sorted-tree on-chain logic adds complexity
-that stream+checkpoint avoids.
+"neighbor" depends on existing leaf values; concurrent inserts on random
+commitments collide rarely but non-zero. Adds sorted-tree on-chain logic
+the append-only tree avoids.
 
-**Recursive proof aggregation (Nova / Halo2 / IVC).** Each user proves
-their own thing; an aggregator folds N proofs into one. Conceptually
-clean and concurrency-safe, but requires a recursion-friendly proving
-system. Groth16 doesn't fold naturally. Out of scope for this Circom
-codebase.
+**LeanIMT (Semaphore v4) dynamic-depth optimization.** Only helps small
+trees (savings vanish past ~1K leaves). Wrong axis for our steady state.
 
-**LeanIMT (Semaphore v4) dynamic-depth optimization.** Only helps for
-small trees (savings vanish past ~1K leaves) and still keeps Poseidon
-calls on-chain. Wrong axis.
-
-**Quinary trees** (5-ary instead of binary). Reduces depth by ~50% but
-increases per-node hash cost (5 inputs vs 2) and circuit constraint
-count. Net wash at our scale per the
+**Quinary trees** (5-ary instead of binary). Reduces depth ~50% but
+increases per-node hash cost (5 inputs vs 2) and circuit constraint count.
+Net wash at our scale per the
 [ethresear.ch benchmarks](https://ethresear.ch/t/gas-and-circuit-constraint-benchmarks-of-binary-and-quinary-incremental-merkle-trees-using-the-poseidon-hash-function/7446).
 
 ## Sources
@@ -733,6 +441,4 @@ count. Net wash at our scale per the
 - [ETH transaction flow in Polkadot SDK — OneBlock+](https://medium.com/@OneBlockplus/understanding-eth-transaction-flow-in-polkadot-sdk-1fedbecaf93c)
 - [Semaphore v4 release (LeanIMT)](https://github.com/semaphore-protocol/semaphore/releases/tag/v4.0.0)
 - [Aztec hybrid public-private zkRollup overview](https://nodes.guru/blog/aztec-network-a-hybrid-public-private-zkrollup-bringing-privacy-to-ethereum)
-- [Designing recursive SNARK architectures — zkdev.com](https://zkdev.com/designing-recursive-snark-architectures-trade-offs-patterns-and-practical-tips/)
 - [Tornado Trees proposal #4 — torn.community](https://torn.community/t/proposal-4-tornado-trees-upgrade/636)
-- [EIP-5988: Poseidon hash function precompile](https://github.com/ethereum/EIPs/pull/5988/files)

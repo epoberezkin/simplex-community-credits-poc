@@ -10,8 +10,7 @@
 //
 // Usage:
 //   node tools/deploy.mjs
-//   TARGET=chopsticks node tools/deploy.mjs  # use PVM artifacts
-//   ETH_RPC_URL=http://localhost:8545 node tools/deploy.mjs
+//   ETH_RPC_URL=http://localhost:8545 node tools/deploy.mjs  # e.g. chopsticks eth-rpc bridge
 
 import { ethers } from 'ethers';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -80,7 +79,7 @@ const totalBefore = await getDot(deployerWallet.address);
 // suppresses the resulting duplicate step log lines.
 let _lastLog = '';
 const dedupLog = (msg) => { if (msg !== _lastLog) console.log(msg); _lastLog = msg; };
-const { tUsdc, pool, createV, assignV, redeemV, checkpointV } = await trackFee('all 6 contracts', () =>
+const { tUsdc, pool, createV, assignV, redeemV, poseidonT3 } = await trackFee('all contracts', () =>
   deployAll({
     signer: admin,
     epochSize: EPOCH_SIZE,
@@ -160,7 +159,7 @@ for (const d of dappDirs) {
   console.log(`> wrote ${p}`);
 }
 
-// Dump a manifest the checkpointer + tutorial can read.
+// Dump a manifest the e2e + tutorial can read.
 const manifest = {
   ethRpcUrl: ETH_RPC_URL,
   chainId: Number(chainId),
@@ -169,7 +168,7 @@ const manifest = {
   createVerifier: await createV.getAddress(),
   assignVerifier: await assignV.getAddress(),
   redeemVerifier: await redeemV.getAddress(),
-  checkpointVerifier: await checkpointV.getAddress(),
+  poseidonT3: await poseidonT3.getAddress(),
   deployer: deployerWallet.address,
   buyers: buyerWallets.map((w) => w.address),
   relays: relayWallets.map((w) => w.address),

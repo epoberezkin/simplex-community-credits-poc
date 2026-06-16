@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "./StreamAndRootRing.sol";
+import {IncrementalMerkleTree} from "./IncrementalMerkleTree.sol";
+import {IPoseidonT3} from "./IPoseidonT3.sol";
 import "./IVerifiers.sol";
 
 interface IERC20 {
@@ -9,24 +10,21 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 value) external returns (bool);
 }
 
-// Stream + checkpoint variant of the voucher pool. See docs/gas-design.md
-// §3b for the design and the rationale for splitting per-tx streaming from
-// batched checkpointing.
-contract VoucherPool {
-    using StreamRingLib for StreamRingLib.State;
-
+// Tornado-frontier variant of the voucher pool. Each buy/assign/redeem folds
+// its commitment(s) into the on-chain Merkle tree immediately (20 Poseidon(2)
+// hashes per leaf), so notes are spendable as soon as their tx lands — no
+// stream, no permissionless checkpoint, no checkpoint circuit. See
+// docs/gas-design.md for the design and the fee comparison vs the old
+// stream+checkpoint variant.
+contract VoucherPool is IncrementalMerkleTree {
     // --- config ---
     IERC20 public immutable stablecoin;
     ICreateVerifier public immutable createVerifier;
     IAssignVerifier public immutable assignVerifier;
     IRedeemVerifier public immutable redeemVerifier;
-    ICheckpointVerifier public immutable checkpointVerifier;
     address public admin;
     uint256 public immutable epochSize;
     uint256 public immutable genesisBlock;
-
-    // --- stream + checkpoint state ---
-    StreamRingLib.State internal state;
 
     // --- nullifiers, bucketed by expiry epoch ---
     mapping(uint32 => mapping(uint256 => bool)) public nullifiers;
@@ -73,42 +71,24 @@ contract VoucherPool {
         ICreateVerifier _create,
         IAssignVerifier _assign,
         IRedeemVerifier _redeem,
-        ICheckpointVerifier _checkpoint,
+        IPoseidonT3 _poseidonT3,
         uint256 _epochSize
-    ) {
+    ) IncrementalMerkleTree(_poseidonT3) {
         require(_epochSize > 0, "pool/epoch");
         stablecoin = _stablecoin;
         createVerifier = _create;
         assignVerifier = _assign;
         redeemVerifier = _redeem;
-        checkpointVerifier = _checkpoint;
         admin = msg.sender;
         epochSize = _epochSize;
         genesisBlock = block.number;
-        state.init();
     }
-
-    // --- batched-checkpoint config ---
-    // Max # of leaves per checkpoint extrinsic. Fixed in the circuit's
-    // template instantiation; the contract enforces it before SNARK verify.
-    // See issue #2 (batching) for the choice — 8 amortises fees ~6× vs B=1
-    // at a ~50K-constraint cost (fits ptau-17 comfortably).
-    uint32 public constant CHECKPOINT_BATCH_MAX = 8;
-    uint256 internal constant DEPTH = 20;
 
     // --- views ---
     function currentEpoch() public view returns (uint32) {
         return uint32((block.number - genesisBlock) / epochSize);
     }
 
-    function streamCount() external view returns (uint32) { return state.streamCount; }
-    function streamAt(uint32 position) external view returns (uint256) { return state.streamAt(position); }
-    function checkpointedRoot() external view returns (uint256) { return state.checkpointedRoot; }
-    function checkpointedCount() external view returns (uint32) { return state.checkpointedCount; }
-    function checkpointedFrontier() external view returns (uint256[DEPTH] memory) {
-        return state.getFrontier();
-    }
-    function isKnownRoot(uint256 root) external view returns (bool) { return state.isKnownRoot(root); }
     function isNullifierSpent(uint32 epoch, uint256 nf) external view returns (bool) {
         return nullifiers[epoch][nf];
     }
@@ -133,7 +113,7 @@ contract VoucherPool {
             "pool/transferFrom"
         );
 
-        uint32 idx = state.appendStream(cm);
+        uint32 idx = _insert(cm);
         deposited += value;
         minted[expiryEpoch] += value;
 
@@ -141,9 +121,9 @@ contract VoucherPool {
     }
 
     // --- assign (relayed for chat user) ---
-    // Spend proofs bind to a checkpointed root (`root` ∈ knownRoots). The
-    // new commitments cmDest + cmChange land in the stream and become
-    // spendable after the next checkpoint.
+    // Spend proofs bind to a recent root (`root` ∈ last 100 roots). The new
+    // commitments cmDest + cmChange are inserted immediately and are spendable
+    // from the next tx onward.
     function assign(
         uint256 nullifier,
         uint32 expiryEpoch,
@@ -155,15 +135,15 @@ contract VoucherPool {
         uint[2] calldata pC
     ) external {
         require(expiryEpoch >= currentEpoch(), "pool/expired");
-        require(state.isKnownRoot(root), "pool/root");
+        require(isKnownRoot(root), "pool/root");
         require(!nullifiers[expiryEpoch][nullifier], "pool/nullifier");
 
         uint[5] memory pubSignals = [root, nullifier, uint256(expiryEpoch), cmDest, cmChange];
         require(assignVerifier.verifyProof(pA, pB, pC, pubSignals), "pool/proof");
 
         nullifiers[expiryEpoch][nullifier] = true;
-        uint32 destIdx = state.appendStream(cmDest);
-        uint32 changeIdx = state.appendStream(cmChange);
+        uint32 destIdx = _insert(cmDest);
+        uint32 changeIdx = _insert(cmChange);
 
         emit Assigned(nullifier, expiryEpoch, cmDest, cmChange, destIdx, changeIdx);
     }
@@ -181,7 +161,7 @@ contract VoucherPool {
         uint[2] calldata pC
     ) external {
         require(expiryEpoch >= currentEpoch(), "pool/expired");
-        require(state.isKnownRoot(root), "pool/root");
+        require(isKnownRoot(root), "pool/root");
         require(!nullifiers[expiryEpoch][nullifier], "pool/nullifier");
 
         address op = address(uint160(operatorId));
@@ -198,73 +178,11 @@ contract VoucherPool {
         require(redeemVerifier.verifyProof(pA, pB, pC, pubSignals), "pool/proof");
 
         nullifiers[expiryEpoch][nullifier] = true;
-        uint32 changeIdx = state.appendStream(cmChange);
+        uint32 changeIdx = _insert(cmChange);
         credit[op] += redeemValue;
         spent[expiryEpoch] += redeemValue;
 
         emit Redeemed(nullifier, expiryEpoch, op, redeemValue, cmChange, changeIdx);
-    }
-
-    // --- checkpoint (permissionless; rolls stream → tree root) ---
-    // Batched, frontier-aware. The SNARK proves that appending the
-    // commitments at positions [oldCount..oldCount+count) to the tree at
-    // (oldRoot, oldFrontier) yields (newRoot, newFrontier). The contract:
-    //   - reads (oldRoot, oldFrontier, oldCount) from state — the prover
-    //     can't fake them;
-    //   - reads cms[0..count) from `state.commitments` and pads the tail
-    //     to zero so the SNARK's fixed B_MAX matches what's on chain;
-    //   - packs all of the above + caller-supplied newRoot/newFrontier
-    //     into the verifier's `pubSignals` array (in the exact order the
-    //     circuit declares).
-    //
-    // No on-chain time gating — anyone can submit at any time the chain
-    // accepts. The 5-min cadence is a polite-primary scheduler convention
-    // (tools/checkpoint.mjs), not a protocol invariant. See issue #3 for
-    // the fallback-liveness rationale.
-    function checkpoint(
-        uint256 newRoot,
-        uint256[DEPTH] calldata newFrontier,
-        uint32 count,
-        uint[2] calldata pA,
-        uint[2][2] calldata pB,
-        uint[2] calldata pC
-    ) external {
-        uint32 oldCount = state.checkpointedCount;
-        require(count >= 1, "ckp/no-progress");
-        require(count <= CHECKPOINT_BATCH_MAX, "ckp/batch-size");
-        uint32 newCount = oldCount + count;
-        require(newCount <= state.streamCount, "ckp/future");
-        require(newCount <= uint32(1 << DEPTH), "ckp/tree-full");
-
-        uint256 oldRoot = state.checkpointedRoot;
-        uint256[DEPTH] memory oldFrontier = state.getFrontier();
-
-        uint[52] memory pubSignals;
-        // Layout matches circuits/src/checkpoint.circom declaration order:
-        //   [0]      oldRoot
-        //   [1]      newRoot
-        //   [2..21]  oldFrontier[0..19]
-        //   [22..41] newFrontier[0..19]
-        //   [42]     oldCount
-        //   [43]     count
-        //   [44..51] cms[0..7]
-        pubSignals[0] = oldRoot;
-        pubSignals[1] = newRoot;
-        for (uint256 d = 0; d < DEPTH; d++) {
-            pubSignals[2 + d] = oldFrontier[d];
-            pubSignals[2 + DEPTH + d] = newFrontier[d];
-        }
-        pubSignals[2 + 2 * DEPTH]     = uint256(oldCount);
-        pubSignals[2 + 2 * DEPTH + 1] = uint256(count);
-        for (uint256 i = 0; i < CHECKPOINT_BATCH_MAX; i++) {
-            // i < count: real leaf from the stream. i >= count: zero pad.
-            pubSignals[2 + 2 * DEPTH + 2 + i] =
-                i < count ? state.streamAt(oldCount + uint32(i)) : 0;
-        }
-        require(checkpointVerifier.verifyProof(pA, pB, pC, pubSignals), "ckp/proof");
-
-        state.applyCheckpoint(newRoot, newCount, newFrontier);
-        emit StreamRingLib.Checkpointed(oldRoot, newRoot, oldCount, newCount);
     }
 
     // --- operator withdraw ---
