@@ -1001,8 +1001,8 @@ Run once per release on actual hardware:
 - Pre-fund the demo buyer's EVM address with tUSDC via an admin script before the demo
 
 ### Deploy Sequence
-1. `npx hardhat compile` (via resolc/revive compiler)
-2. Deploy `PoseidonT3`, `PoseidonT7` (libraries)
+1. `npx hardhat compile` (plain solc → EVM bytecode; runs under pallet-revive REVM — no resolc/PVM)
+2. Deploy `PoseidonT3` (Poseidon(2) for the Merkle tree, from circomlibjs bytecode; `PoseidonT7` is not deployed — commitments arrive as proof public inputs, never hashed on-chain)
 3. Deploy `CreateVerifier`, `AssignVerifier`, `RedeemVerifier`
 4. Deploy `VoucherPool` (constructor links verifiers + stablecoin address)
 5. Create pallet_assets token + mint test supply (or deploy ERC20 mock)

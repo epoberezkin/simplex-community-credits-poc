@@ -78,4 +78,3 @@ export async function verify(name, proof, publicSignals) {
 export const proveCreate = (input) => prove('create', input);
 export const proveAssign = (input) => prove('assign', input);
 export const proveRedeem = (input) => prove('redeem', input);
-export const proveCheckpoint = (input) => prove('checkpoint', input);

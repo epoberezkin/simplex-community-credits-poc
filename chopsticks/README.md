@@ -1,128 +1,74 @@
-# Chopsticks + Paseo Asset Hub deployment
+# Chopsticks + Paseo/Polkadot Asset Hub
 
-## State as of this session
+Local fork of a real Asset Hub so the protocol e2e can run against the actual
+pallet-revive runtime — real weights, fees, storage deposits, and the
+`bn128`/ecPairing precompile the Groth16 verifiers need.
 
-End-to-end status against the chopsticks-forked Paseo Asset Hub:
+## Status
 
-| Step                                                  | Works |
-|-------------------------------------------------------|-------|
-| chopsticks boots, eth-rpc bridges, chainId reachable  | ✅    |
-| pre-funding EOAs via `import-storage`                 | ✅    |
-| resolc → PVM artifacts (`compile-resolc.mjs`)         | ✅    |
-| `resolc --link` (PoseidonT3 lib address → PVM blob)   | ✅    |
-| Deploy PoseidonT3 + TestUSDC + 3 verifiers + Pool     | ✅    |
-| Read calls (eth_call, view methods)                   | ✅    |
-| `verifyProof` via eth_call (ecPairing precompile)     | ✅    |
-| `mint`, `approve`, `registerOperator` state txs       | ✅    |
-| **`buyAndCreate` (verify + transferFrom + insert)**   | ❌    |
-| Same for `assign`, `redeem` (same heavy combo)        | ❌    |
+End-to-end **works** against a chopsticks-forked Asset Hub via the eth-rpc
+bridge: deploy → reads → `buyAndCreate` / `assign` / `redeem` / `withdraw`,
+with per-tx fee measurement. The refactored design folds each commitment into
+an on-chain Tornado-style Merkle tree inside the user tx (20 on-chain
+Poseidon(2) hashes per leaf), and that heavy single-tx executes fine under
+pallet-revive's **REVM** — see `../docs/gas-design.md` for the measured fees
+(buyAndCreate ~16k, assign ~25k, redeem ~18k pallet-revive gas units).
 
-`buyAndCreate` fails with pallet-revive `OutOfGas` even with a 100M gas hint.
-Each of the three sub-operations runs in isolation (Groth16 verify worked
-via `eth_call`, `transferFrom` succeeded as a separate tx), but their
-combination exceeds the per-extrinsic ref_time / proof_size budget Paseo
-Asset Hub allows for a single pallet_revive::call.
-
-This is a runtime-limit issue, not a contract bug. The same VoucherPool
-runs end-to-end on a Hardhat local node in <3s (10/10 steps).
-
-## Fixes for someone continuing the work
-
-In order of effort:
-
-1. **Split buyAndCreate / assign / redeem into two txs each.** Tx A does
-   the Groth16 verify + state checks, tx B does the `transferFrom` + tree
-   insert. Trade-off: loses atomicity (someone could front-run between A
-   and B), so add a per-buyer commit-then-finalize gate. Probably a day
-   of work to refactor `VoucherPool.sol` + the harness.
-
-2. **Bump pallet-revive's per-call weight limit on the forked chain.**
-   The hard cap comes from `RuntimeBlockWeights::max_block / 2` plus
-   per-extrinsic class limits in the Asset Hub runtime config. chopsticks
-   supports a `wasm-override` field that swaps the runtime wasm wholesale
-   — building a permissive custom runtime takes ~half a day. Storage
-   overrides via import-storage won't help here since these are constants.
-
-3. ~~Recompile circuits at smaller tree depth.~~ — **tried, did not fix
-   the heavy-tx OutOfGas.** Reducing DEPTH from 20 → 12 → 8 cut the
-   Merkle-insert Poseidon-call count proportionally and made the
-   constructor breath, but `buyAndCreate` still OOGs at depth 8. The
-   remaining bottleneck is likely the `proof_size` weight from the
-   storage reads/writes the verifier + transferFrom + insert combine, not
-   ref_time from Poseidon ops. Raising the eth-rpc `gas` hint to 1T
-   doesn't help — pallet-revive caps independently. (For posterity: at
-   depth 12 `verifyProof` alone returns TRUE in 4064 "gas units" via
-   `eth_call`, simple ERC20 `transfer` is 4615; `buyAndCreate` exceeds
-   even 100M of the same unit.)
-
-## What's wired up today
-
-- `chopsticks/paseo-asset-hub.yml`
-  - prefunds three deterministic-but-PoC-unique EOAs (deployer / buyer / relay)
-    on the substrate side via the pallet-revive address mapping
-    (`AccountId32 = h160 || 0xee × 12`)
-  - tries dwellir + ibp + dotters + turboflakes endpoints in order
-  - mints 1M tUSDC (asset id 1984) to Alice, Bob, and the buyer EOA
-- `chopsticks/run.sh` — boots chopsticks (ws:8000) and eth-rpc (http:8545)
-- `contracts/scripts/compile-resolc.mjs` — PVM compile in ~16 s
-- `test/e2e/deploy.mjs` — `loadArtifact` is TARGET-aware:
-  - `TARGET=hardhat` (default) → reads `contracts/artifacts/`
-  - `TARGET=chopsticks` → reads `contracts/artifacts-pvm/` and links
-    PoseidonT3 via `resolc --link`
-- `test/e2e/flow.test.mjs` — `TARGET=chopsticks` path uses PoC-unique keys
-  and passes an explicit `{ gasLimit: 100_000_000n }` on every state tx
-  to bypass `eth_estimateGas` (the bridge under-budgets Groth16+Merkle)
-
-## Lessons that bit us
-
-1. **Hardhat default keys are dangerous on a forked chain.** Account #0's
-   nonce-0 CREATE address already has code on real Paseo (someone else used
-   the same default key). Result: `pallet-revive::Error::DuplicateContract`
-   on the very first deploy. Mitigation: derive deployer keys from
-   `keccak256("simplex-community-credits-poc-…")` seeds so they're unique
-   to this PoC.
-
-2. **`pkill -9 -f chopsticks` doesn't actually kill it.** The process is
-   `node /usr/local/.../chopsticks` and pkill's pattern match misses it.
-   Kill by PID instead. The symptom is chopsticks listening on a "wrong"
-   port (8001, 8002 …) because the original instance still holds 8000 —
-   import-storage changes never take effect for new YAML.
-
-3. **Tree.init() in the constructor blows the per-extrinsic weight on
-   pallet-revive.** Pre-compute the 21 zero-subtree hashes and embed them
-   as constants in `IncrementalMerkleTree.sol::_zero()` — done. This drops
-   the constructor from 20 PoseidonT3.hash calls to a single SSTORE per
-   level.
-
-4. **VoucherPool's PVM blob isn't directly deployable**: it's raw ELF
-   (`0x7f454c46`) when PoseidonT3 isn't yet linked. Use
-   `resolc --link --libraries "poseidon-solidity/PoseidonT3.sol:PoseidonT3=0x…"`
-   to relocate against the deployed address and produce a PVM blob
-   (magic `0x50564d00`). Implemented in `test/e2e/deploy.mjs::linkLibrariesPvm`.
-
-5. **Solc optimizer hangs on PoseidonT3's inline-asm constant block.**
-   Disable in standard-JSON settings (`optimizer.enabled: false`). PVM
-   bytecode grows ~3× but resolc's own LLVM `-O z` recovers most at
-   deploy time.
+> Historical note: an earlier design *avoided* on-chain Poseidon (stream +
+> permissionless `checkpoint()`) because the combined verify + transferFrom +
+> insert was believed to OOG pallet-revive's per-extrinsic budget under its
+> native PVM path. Measurement under REVM disproved that, so the contracts now
+> deploy as plain EVM bytecode with no resolc/PVM and no checkpoint step.
 
 ## Running it
 
 ```bash
-# Toolchain (one-time):
-#   - circom 2.2.3       → ~/.local/bin/circom
-#   - solc 0.8.24        → ~/.local/bin/solc  (symlink from hardhat cache)
-#   - resolc 1.1.0       → ~/.local/bin/resolc
-#   - eth-rpc 0.14.0     → ~/.local/bin/eth-rpc
+# toolchain (one-time): circom (rebuild circuits), eth-rpc (the bridge).
+#   - eth-rpc  → ~/.local/bin/eth-rpc   (prebuilt from polkadot-sdk releases)
+#   No resolc / PVM compile is needed — the e2e deploys EVM bytecode.
 
-# 1. Compile contracts
-node contracts/scripts/compile-resolc.mjs       # → contracts/artifacts-pvm/
+# 1. boot chopsticks + the eth-rpc bridge (ws:8000 + http:8545):
+CHAIN=paseo bash chopsticks/run.sh        # or CHAIN=polkadot
 
-# 2. Boot the forked chain + bridge
-./chopsticks/run.sh                              # ws:8000 + http:8545
-
-# 3. Run the e2e
+# 2. run the e2e against it:
 cd test/e2e && TARGET=chopsticks node flow.test.mjs
-
-# Current expected: deploys + reads + simple txs succeed; heavy txs OOG.
-# See "Fixes for someone continuing the work" above.
 ```
+
+Contracts are deployed by `test/e2e/deploy.mjs` (EVM bytecode from the hardhat
+build, plus `PoseidonT3` from circomlibjs bytecode); `TARGET=chopsticks` just
+points the harness at the eth-rpc bridge and passes an explicit gas limit.
+
+## What's wired up
+
+- `chopsticks/paseo-asset-hub.yml` / `polkadot-asset-hub.yml`
+  - prefunds deterministic-but-PoC-unique EOAs (deployer / buyer / relay) on
+    the substrate side via the pallet-revive address mapping
+    (`AccountId32 = h160 || 0xEE × 12`)
+  - mints tUSDC (asset id 1984) to Alice/Bob + the buyer EOAs
+- `chopsticks/run.sh` — boots chopsticks (ws:8000) and eth-rpc (http:8545)
+- `paseo-fork.yml` — a trimmed config used for fee runs: a single reachable
+  endpoint + a pinned block (see "gotchas").
+
+## Gotchas
+
+- **Use `@acala-network/chopsticks@latest`.** The old 1.3.1 pin silently hangs
+  on Node 22 (boots, never opens the WS). Run with
+  `--build-block-mode Instant` so a block seals when a tx hits the pool
+  (eth-rpc's automine is off); otherwise `tx.wait()` hangs. A fork that has
+  been auto-mined for hours can wedge its block-builder — restart fresh.
+- **Endpoints.** Prefer `wss://asset-hub-paseo-rpc.n.dwellir.com`
+  (`asset-hub-paseo.ibp.network` was unreachable in testing). chopsticks tries
+  the yml list in order, so a dead first endpoint makes it hang — pin a
+  reachable one with `--endpoint` or reorder the list.
+- **Hardhat default keys collide on a forked Asset Hub** — account #0's
+  CREATE@nonce-0 address already has code there (`DuplicateContract`). The
+  configs prefund PoC-unique keys derived from
+  `keccak256("simplex-community-credits-poc-…")` (see `tools/keys.mjs`).
+- **eth_estimateGas under-budgets pallet-revive** — pass an explicit
+  `{ gasLimit: 100_000_000n }` on every state-changing tx (the harness does).
+- **eth-rpc binds IPv6 first** — use `localhost:8545`, not `127.0.0.1:8545`.
+- **Stale caches** — delete `chopsticks/*.sqlite*` to refetch chain state, and
+  `~/.local/share/eth-rpc/eth-rpc.db*` (can throw `UNIQUE constraint failed`)
+  when restarting the bridge from scratch.
+- **`pkill -f chopsticks` self-matches your shell** — kill by the PID holding
+  the port (`ss -ltnp`) instead.

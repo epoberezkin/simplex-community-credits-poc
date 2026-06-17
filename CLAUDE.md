@@ -4,72 +4,88 @@ Spec lives in [`community-credits-poc-plan.md`](./community-credits-poc-plan.md)
 Read §3 (simplifications vs whitepaper) and §8 (three-dapp split) before
 implementing anything new.
 
+> **Design note — branch `ab/tornado-frontier`.** The PoC was refactored away
+> from the original *stream + permissionless checkpoint* design (which only
+> SSTORE'd each commitment to an on-chain "stream" and rolled streamed leaves
+> into the Merkle root in a separate batched-SNARK `checkpoint()` extrinsic, to
+> *avoid* on-chain Poseidon hashing under pallet-revive's native PVM path) to a
+> **Tornado-style on-chain frontier**: every buy/assign/redeem folds its
+> commitment(s) into the on-chain incremental Merkle tree immediately (20
+> on-chain Poseidon(2) hashes per leaf). There is no stream, no checkpoint, no
+> checkpoint circuit/verifier, no checkpointer daemon, and no resolc/PVM — the
+> contracts run as plain solc EVM bytecode, locally on Hardhat and on
+> pallet-revive's **REVM** (EVM interpreter) on a chopsticks-forked Asset Hub.
+> Notes are spendable as soon as their tx lands. Measurement showed the
+> heavy single-tx (Groth16 verify + transferFrom + 20-Poseidon insert) and the
+> tree constructor's 20 Poseidon calls execute fine under REVM, which is why
+> the checkpoint indirection was dropped — which brings the implementation
+> back in line with the plan: `community-credits-poc-plan.md` §6.3 always
+> specified an on-chain incremental Merkle tree (Tornado frontier); the
+> stream+checkpoint was a later implementation deviation, now reverted.
+> Everything below reflects the current code.
+
 ## What works today
 
-- `pnpm --filter test/e2e test` — full protocol e2e on Hardhat local in ~3s
-  (10/10 steps: buy → import → assign-prove (chat, no signer) → relay-submit
-  → double-spend-revert → redeem-prove → relay-submit → withdraw → solvency
-  → codec round-trip).
+- `pnpm --filter e2e test` — full protocol e2e on a Hardhat local node
+  (22/22 steps: 2 buys → 4 assigns → 4 redeems → 2 withdraws → solvency →
+  double-spend revert (`pool/nullifier`) → unknown-root revert (`pool/root`)
+  → codec round-trip). Each buy/assign/redeem inserts its commitment(s) into
+  the on-chain tree in the same tx, so notes are spendable immediately.
+- `TARGET=chopsticks CHOPSTICKS_RPC_URL=… CHOPSTICKS_WS_URL=… node test/e2e/flow.test.mjs`
+  — the same e2e against a chopsticks-forked Paseo Asset Hub via the eth-rpc
+  bridge (REVM). 19/19, with per-tx pallet-revive fee measurement.
 - `pnpm --filter circuits run build` — compile + Groth16 setup + Solidity
-  verifier export for all 3 circuits.
-- `pnpm --filter contracts run build` — Hardhat compile (EVM bytecode).
-- `node contracts/scripts/compile-resolc.mjs` — resolc → PVM bytecode for
-  pallet-revive (16 s, 7 artifacts to `contracts/artifacts-pvm/`).
+  verifier export for the 3 circuits (create / assign / redeem).
+- `pnpm --filter contracts run build` — Hardhat compile (EVM bytecode). The
+  SAME bytecode runs locally and under pallet-revive REVM; there is no
+  resolc/PVM build step anymore.
 - `pnpm --filter @community-credits/{purchaser,chat,relay} build` — three
   Vite bundles. ZK artifacts live in `packages/{purchaser,chat}/public/zk/`.
+- `pnpm --filter @community-credits/browser-test test` (Playwright) — full
+  2×2×2 flow across all three dapps + adversary cases (7/7). See the
+  Playwright note under "chopsticks-specific gotchas" for the Ubuntu-26.04
+  browser-install workaround.
 - `chopsticks/run.sh` — boots a Paseo Asset Hub fork on ws://127.0.0.1:8000
   (+ eth-rpc bridge on 8545 if installed).
 
 ## Toolchain (what's installed and why)
 
 - Node 20.19.4 (`/usr/bin/node`). `import.meta.dirname` doesn't exist —
-  use `dirname(fileURLToPath(import.meta.url))`.
-- `pnpm@9.15.9` (specifically; pnpm 10+ requires Node 22+).
+  use `dirname(fileURLToPath(import.meta.url))`. (chopsticks @latest works on
+  Node 22 too; the pinned 1.3.1 hangs there — see chopsticks gotchas.)
+- `pnpm@9.15.9` (pnpm 10+ requires Node 22+).
 - `circom 2.2.3` — at `~/.local/bin/circom` (prebuilt binary from
-  iden3/circom releases).
-- `solc 0.8.24` — symlinked at `~/.local/bin/solc` pointing at the binary
-  hardhat already cached at
-  `~/.cache/hardhat-nodejs/compilers-v2/linux-amd64/solc-linux-amd64-v0.8.24+commit.e11b9ed9`.
-  resolc requires solc in PATH (versions `>=0.8.0,<=0.8.34`).
-- `resolc 1.1.0` — at `~/.local/bin/resolc` (musl-linux-x86_64 from
-  paritytech/revive releases).
-- `eth-rpc 0.14.0` (pallet-revive-eth-rpc) — at `~/.local/bin/eth-rpc`
-  (prebuilt from polkadot-sdk releases).
+  iden3/circom releases). Only needed to rebuild circuits.
+- `solc 0.8.24` — Hardhat downloads + caches it automatically; no manual
+  install or PATH symlink needed (resolc, which used to require solc in PATH,
+  is gone).
+- `eth-rpc` (pallet-revive-eth-rpc) — at `~/.local/bin/eth-rpc` (prebuilt
+  from polkadot-sdk releases). Bridges chopsticks' substrate RPC to eth_*
+  JSON-RPC so ethers can talk to the fork.
 
-## Big gotcha: resolc + PoseidonT3 + solc optimizer = OOM
+There is **no `resolc`** in the toolchain anymore — the contracts are
+deployed as EVM bytecode (run by pallet-revive's REVM), not compiled to PVM.
 
-`poseidon-solidity/PoseidonT3.sol` contains a ~50 KB inline-assembly block
-with thousands of precomputed BN254 round constants. With the solc
-optimizer ON, solc enters a pathological case: RSS climbs ~1.5 GB/min until
-OOM-crash. Reproduced at 8.5 GB RSS after 5 min. resolc surfaces the crash
-as an empty `solc error:` diagnostic, often after wall-time so long it looks
-like the laptop slept.
+## On-chain Poseidon(2)
 
-Fix is one line in `contracts/scripts/compile-resolc.mjs`:
-```js
-settings: { optimizer: { enabled: false }, ... }
-```
-PVM bytecode for PoseidonT3 grows ~3× without it (70 KB → 206 KB) but
-resolc's own LLVM `-O z` pass recovers most of the loss.
+The Merkle tree hashes sibling pairs on-chain with Poseidon(2) ("PoseidonT3").
+The implementation is **deployed from circomlibjs bytecode**, not a Solidity
+library:
 
-`--disable-solc-optimizer` is NOT accepted as a CLI flag in standard-JSON
-mode; it has to go in the settings block. The CLI flag exists for the
-`--bin file.sol` mode.
-
-## Other resolc / standard-JSON quirks
-
-- `execFileSync` deadlocks when piping large stdin (>~64 KB) — both input
-  and output pipes fill up. Always write input to a tmpfile and pass file
-  descriptors: `stdio: [inFd, outFd, 'inherit']`. Symptom: resolc shows 0%
-  CPU and ~0 RSS, looks hung.
-- resolc 1.x rejects `urls:` in standard-JSON sources entirely with
-  `missing field 'content' at line 1 column N`, regardless of
-  `--allow-paths`. Inline every source as `content:` and drop
-  `--allow-paths`; bare imports (e.g. `poseidon-solidity/PoseidonT3.sol`)
-  still resolve as long as the import path is a key in the sources map.
-  See `compile-resolc.mjs` for the pattern.
-- IVerifiers.sol has only interfaces → no bytecode artifact → 8 sources
-  produces 7 artifact files. Not a bug.
+- `packages/core/src/poseidon-contract.js` exports
+  `poseidonT3Bytecode = poseidonContract.createCode(2)`. `deploy.mjs` deploys
+  it with an empty ABI (`new ethers.ContractFactory([], poseidonT3Bytecode, signer)`);
+  `VoucherPool`'s constructor takes its address and `IncrementalMerkleTree`
+  calls it via `IPoseidonT3.poseidon(uint256[2])`.
+- This bytecode is **bit-identical** to `circuits/src/merkle.circom`'s
+  Poseidon(2) and `packages/core/src/poseidon.js` (all circomlib/circomlibjs),
+  so off-chain mirror root == on-chain `getLatestRoot()` (the e2e asserts this
+  after every insert).
+- Selector gotcha: `poseidonContract.generateABI(2)` *labels* the input
+  `bytes32[2]`, but the deployed bytecode dispatches on
+  `poseidon(uint256[2])`. The `IPoseidonT3` interface and all calls use
+  `uint256[2]` — confirmed correct by deploy-and-call. No library linking is
+  involved (it's a plain contract, called through an interface).
 
 ## ethers v6 footguns
 
@@ -108,26 +124,21 @@ mode; it has to go in the settings block. The CLI flag exists for the
 - circomlib resolves via `-l circuits/node_modules` + bare-style includes:
   `include "circomlib/circuits/poseidon.circom"`. Do not use
   `../../node_modules/...` paths — fragile across pnpm hoisting.
+- There are **3 circuits**: create / assign / redeem (the 4th, `checkpoint`,
+  was deleted with the stream+checkpoint design). They are agnostic to how
+  the tree is updated on-chain — they only prove Merkle membership against a
+  root — so the on-chain-insert refactor did **not** change them or require a
+  new trusted setup.
 - The PoC uses Poseidon-based owner keys (`pkHash = Poseidon(sk)`) — see
   plan §4.5.1. Real WP says BabyJubjub; we trade EC sig security for ~150
-  constraints vs 10K. Total sizes: create 247 / assign 6859 / redeem 6503
-  non-linear constraints. ptau 14 (`powersOfTau28_hez_final_14.ptau`,
-  19 MB, Hermez ceremony) covers all three with room.
+  constraints vs 10K. Sizes: create 247 / assign 6859 / redeem 6503
+  non-linear constraints — all fit ptau-14, though `setup.mjs` uses the
+  vendored `ptau/powersOfTau28_hez_final_17.ptau` (already present).
 - Solidity verifier signature: `verifyProof(uint[2] pA, uint[2][2] pB,
-  uint[2] pC, uint[N] pubSignals)`. N = number of public inputs in circuit
-  order (create=3, assign=5, redeem=6). The public-input ORDER matches the
-  `component main { public [...] }` declaration order in the .circom file
-  — get this wrong and the verifier silently rejects valid proofs.
-
-## Poseidon library deployment
-
-`poseidon-solidity` exports a `library PoseidonT3` (not contract) with
-`function hash(uint[2]) public pure` → external-library link required.
-- Their official keyless deterministic-deployment proxy fails on a fresh
-  hardhat node with `nonce already used`. Don't use it for local tests.
-- `test/e2e/deploy.mjs::deployPoseidonT3()` deploys it as a fresh contract
-  and links VoucherPool's bytecode at deploy time via the
-  `linkReferences` field. Address doesn't need to be canonical for the PoC.
+  uint[2] pC, uint[N] pubSignals)`. N = public-input count in circuit order
+  (create=3, assign=5, redeem=6). The ORDER matches the
+  `component main { public [...] }` declaration in the .circom file — get it
+  wrong and the verifier silently rejects valid proofs.
 
 ## Vite + workspace package gotchas
 
@@ -150,31 +161,35 @@ grep -rE "BrowserProvider|eth_requestAccounts|discoverProviders|connectEvm|walle
 ```
 must return zero matches (the only acceptable hit is the comment that
 documents the rule). The chat dapp reads chain via
-`ethers.JsonRpcProvider` (read-only); in production this becomes
-polkadot-api + smoldot.
+`ethers.JsonRpcProvider` (read-only) and rebuilds its tree mirror from
+`VoucherCreated` / `Assigned` / `Redeemed` events (inserting commitments in
+`leafIndex` order); in production this becomes polkadot-api + smoldot.
 
 ## Chopsticks
 
-- The dwellir endpoint in older configs (`asset-hub-paseo-rpc.dwellir.com`)
-  is dead. Use one of `wss://asset-hub-paseo.ibp.network`,
-  `wss://asset-hub-paseo.dotters.network`,
-  `wss://asset-hub-paseo-rpc.n.dwellir.com`,
-  `wss://sys.turboflakes.io/asset-hub-paseo`. The yml lists them so
-  chopsticks tries in order.
+- Use `@acala-network/chopsticks@latest`, **not** the old 1.3.1 pin — 1.3.1
+  silently hangs on Node 22 (boots, never opens the WS port). @latest works.
+- Run with `--build-block-mode Instant` so a block is sealed when a tx hits
+  the pool (eth-rpc's automine is off). Otherwise tx.wait() hangs — either
+  use Instant mode or run a `dev_newBlock` ticker. A long-running fork that
+  has been auto-mined for hours can wedge its block-builder; restart fresh.
+- Endpoints: prefer `wss://asset-hub-paseo-rpc.n.dwellir.com` (others in the
+  yml; `asset-hub-paseo.ibp.network` was unreachable in testing). chopsticks
+  tries the list in order — a dead first endpoint makes it hang, so pin the
+  reachable one with `--endpoint` or reorder the yml.
 - Balance values must be strings if > 2^53 - 1
-  (`free: '1000000000000000000'` not `free: 1000000000000000000`).
-  Same for any u128 storage value.
-- Chopsticks startup signal: log line
-  `Paseo Asset Hub RPC listening on http://[::]:8000`. Grep
+  (`free: '1000000000000000000'`). Same for any u128 storage value.
+- Startup signal: log line `Paseo Asset Hub RPC listening on …:8000`. Grep
   case-insensitively (`grep -qi listening`).
 - SQLite cache at `chopsticks/*.sqlite*` is gitignored. Delete to force a
   fresh fetch of chain state.
 - Asset id 1984 is the USDT convention on Asset Hub. To prefund a test
   account with tUSDC, add to `Assets.Account` and bump
   `Assets.Asset[1984].{accounts, supply}` in the import-storage block.
-- Pallet-revive maps an EVM address to a substrate AccountId32 via
-  `keccak256(eth_addr)[12..]`. Operators / buyers must hold PAS on that
-  derived substrate account for the eth-rpc bridge to let them pay gas.
+- pallet-revive maps an EVM address to a substrate AccountId32 by suffix
+  padding: `h160 || 0xEE × 12`. Operators / buyers must hold PAS on that
+  derived account for the eth-rpc bridge to let them pay gas; the
+  fee meter reads `system.account` on the same derived address.
 
 ## Test harness (Bash tool) quirks
 
@@ -183,18 +198,21 @@ polkadot-api + smoldot.
   `cd path && cmd` in the same call.
 - Long `sleep`s + `run_in_background`: the tool prefers
   `until <check>; do sleep N; done` loops with `run_in_background: true`.
+- `pkill -f <pattern>` self-matches the calling shell (its argv contains the
+  pattern), so `pkill -f chopsticks` can kill your own wrapper. Kill by the
+  PID holding the port (`ss -ltnp`) instead.
 - The Agent tool needs `git HEAD` to exist (it uses worktrees). Spawning
   an Agent in a fresh repo with no commits fails with
   `Failed to resolve base branch "HEAD"`.
 
 ## Files most likely to change
 
-- `community-credits-poc-plan.md` — the spec. Treat as source of truth.
-  Keep simplifications-vs-whitepaper (§3) in sync if you alter the
-  protocol.
-- `contracts/contracts/VoucherPool.sol` — protocol surface. Any change here
-  cascades to `core/contract-evm.js` (if added), `test/e2e/flow.test.mjs`,
-  and the three dapps.
+- `community-credits-poc-plan.md` — the spec. Treat as source of truth; §6.3
+  already specifies the on-chain incremental Merkle tree this implementation
+  uses (the deploy-sequence build note was the only stale bit, now fixed).
+- `contracts/contracts/VoucherPool.sol` + `IncrementalMerkleTree.sol` +
+  `IPoseidonT3.sol` — protocol surface. Changes cascade to
+  `test/e2e/{deploy,flow.test,fees}.mjs`, `tools/deploy.mjs`, and the dapps.
 - `circuits/src/*.circom` — circuit changes invalidate the trusted setup;
   re-run `pnpm --filter circuits run build` (compile + ceremony +
   verifier export) and re-copy the `.wasm` + `_final.zkey` artifacts into
@@ -204,77 +222,25 @@ polkadot-api + smoldot.
 
 - **Hardhat default keys collide on a forked Paseo.** Account #0's CREATE
   address at nonce 0 already has code on real Paseo (someone else used the
-  same key). Deploying anything from that account errors with
+  same key). Deploying from that account errors with
   `pallet-revive::Error::DuplicateContract`. Derive deployer keys from
-  PoC-unique seeds instead — see `chopsticks/paseo-asset-hub.yml` for the
-  three `keccak256("simplex-community-credits-poc-…")` keys we use.
+  PoC-unique seeds — see `tools/keys.mjs` / the `keccak256("simplex-community-credits-poc-…")`
+  keys prefunded in `chopsticks/paseo-asset-hub.yml`.
 
-- **`pkill -f chopsticks` does not kill chopsticks.** The process name is
-  `node /usr/local/.../chopsticks/.../cli.js`; the substring `chopsticks`
-  is in argv but pkill's pattern-match misses it under some configurations.
-  Symptom: new chopsticks instance binds to port 8001/8002 instead of 8000
-  (collision falls through to the next port), and your import-storage
-  changes silently never take effect because the old instance still serves
-  the eth-rpc bridge. Always kill by PID.
+- **eth_estimateGas under-budgets pallet-revive calls.** ethers v6's default
+  estimateGas pre-flight returns gas values that pallet-revive's weight
+  conversion treats as OutOfGas. Pass `{ gasLimit: 100_000_000n }` explicitly
+  on every state-changing tx via `txOpts` / call options.
 
-- **resolc emits ELF, not PVM, when a contract has unresolved library
-  refs.** VoucherPool ships as raw ELF (magic `0x7f454c46`) because
-  PoseidonT3 isn't linked yet. `resolc --link --libraries 'path:Name=0x…'`
-  relocates the ELF against the deployed library address and rewrites it
-  in place as a PolkaVM blob (magic `0x50564d00`). Implemented in
-  `test/e2e/deploy.mjs::linkLibrariesPvm`. EVM/hardhat uses the standard
-  solc placeholder scheme (`linkLibrariesEvm`).
-
-- **Pre-compute Merkle zero-subtree hashes; don't call `PoseidonT3.hash`
-  in the constructor.** `tree.init()` doing 20 external Poseidon calls
-  blows pallet-revive's per-extrinsic ref_time budget (constructor OOG).
-  Constants are hardcoded in `IncrementalMerkleTree.sol::_zero()`.
-
-- **eth_estimateGas under-budgets pallet-revive calls.** ethers v6's
-  default estimateGas pre-flight returns gas values that pallet-revive's
-  weight conversion treats as OutOfGas. Pass `{ gasLimit: 100_000_000n }`
-  explicitly on every state-changing tx via `txOpts` / call options.
-
-- **Per-extrinsic weight cap on heavy multi-op txs — FIXED by stream +
-  checkpoint.** Historical issue: combined verify + transferFrom +
-  20-Poseidon insert in one extrinsic blew pallet-revive's per-extrinsic
-  ref_time. Resolution: the protocol now appends commitments to a stream
-  (`state.appendStream(cm)` is just an SSTORE) and the 20-Poseidon
-  Merkle insert is moved into a separate, permissionless `checkpoint()`
-  tx that proves the insert with a SNARK. `buyAndCreate` / `assign` /
-  `redeem` are now ecPairing verify + transferFrom + a couple of SSTOREs
-  — well under the cap. Measured: each fits in ~4 k pallet-revive gas
-  units (see docs/gas-design.md §"Per-op weight"). Tested green on
-  chopsticks-forked Polkadot Asset Hub.
-
-- **Batched checkpoint + on-chain Merkle frontier (issues #2 + #3).**
-  `checkpoint()` now accepts up to `CHECKPOINT_BATCH_MAX=8` leaves per
-  extrinsic via one Groth16 verify, amortising fees ~6×. The contract
-  stores the Tornado-style frontier (`uint256[20]`) and the SNARK proves
-  the (oldFrontier → newFrontier) transition; checkpointer is therefore
-  stateless and a fresh instance can take over without history replay.
-  Public-input layout (52 entries) is documented at the top of
-  `checkpoint()` in `VoucherPool.sol` and at the bottom of
-  `circuits/src/checkpoint.circom` — keep both in sync if either side
-  changes. **No on-chain time gating**: the 5-min cadence (#2 second
-  requirement) lives in `tools/checkpoint.mjs`'s scheduler only, so any
-  participant (an SMP relay, an affected user) can step in at will.
-
-- **Stale PVM artifacts silently break the chopsticks e2e.**
-  `test/e2e/deploy.mjs` loads from `contracts/artifacts-pvm/` when
-  `TARGET=chopsticks` (pallet-revive needs PolkaVM bytecode, not EVM).
-  Those blobs are produced by `node contracts/scripts/compile-resolc.mjs`
-  — a step that is NOT wired into `pnpm --filter contracts run build`.
-  Consequence: after a fresh `pnpm --filter circuits run build` the
-  trusted setup changes → new verifier .sol constants → new hardhat
-  artifacts, but the PVM artifacts still contain the previous
-  ceremony's verifier. The deployed verifier rejects every new proof
-  and `buyAndCreate` reverts with `pool/proof`. pallet-revive surfaces
-  this as `CALL_EXCEPTION`, status=0, gasUsed ≈ 4 k (the revert is
-  before any real work, so the gas counter looks like a no-op).
-  `test/e2e/deploy.mjs::assertPvmArtifactsFresh()` now compares the
-  verifier .sol mtimes against the PVM .json mtimes and errors with a
-  clear hint pointing at `compile-resolc.mjs`.
+- **On-chain Poseidon inserts run fine under REVM.** The old design avoided
+  on-chain hashing because the combined verify + transferFrom + 20-Poseidon
+  insert was believed to blow pallet-revive's per-extrinsic weight under PVM.
+  Measurement on a chopsticks-forked Paseo Asset Hub (REVM) showed it
+  executes fine: buyAndCreate ~16k, assign ~25k, redeem ~18k pallet-revive
+  gas units; the `IncrementalMerkleTree` constructor's 20 Poseidon calls also
+  deploy fine (VoucherPool deploy ~3M gas). That is why the stream+checkpoint
+  + resolc/PVM machinery was removed. Per-tx cost is independent of tree depth
+  (Tornado frontier = constant 20 hashes per insert).
 
 - **eth-rpc binds to IPv6 first.** `[::1]:8545` and `localhost:8545` work;
   `127.0.0.1:8545` may silently time out. The harness uses `localhost`.
@@ -285,22 +251,17 @@ polkadot-api + smoldot.
 
 - **eth-rpc receipt sqlite gets dirty.** `~/.local/share/eth-rpc/eth-rpc.db*`
   caches block + log records and can throw `UNIQUE constraint failed`
-  on a restart. Delete the db files when restarting chopsticks from
-  scratch.
+  on a restart. Delete the db files when restarting chopsticks from scratch.
+
+- **Playwright on an unsupported OS (e.g. Ubuntu 26.04).** `playwright install
+  chromium` aborts at an OS-support check before downloading. Bypass it with
+  `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64` for both the install AND
+  the test run (so launch resolves the fallback binary path). The downloaded
+  Chrome-for-Testing build is generic-linux and runs headless with the host's
+  existing libs — no sudo needed.
 
 ## What's NOT done
 
-- Re-run chopsticks-fork e2e + refresh the README's per-action fee
-  numbers after the batched-checkpoint + frontier landing (issues #2 +
-  #3). The current numbers in `README.md` predate B_MAX=8 and the
-  frontier SSTOREs; per-flow cost is expected to drop (one checkpoint
-  amortises ~5 leaves) but each checkpoint becomes more expensive (~20
-  extra SSTOREs for the frontier). Run `bash chopsticks/run.sh` +
-  `pnpm --filter e2e run test:chopsticks` to refresh.
-- Auto-rebuild of PVM artifacts on circuits change. `compile-resolc.mjs`
-  remains a manual step (deploy.mjs gates with a clear error). If we
-  want a one-command flow, wire it into a `pnpm build:pvm` script or
-  into `test:chopsticks` itself (~16 s overhead).
 - Mobile-bench page (`?bench=1` in dapps), real mobile manual pass — out
   of session scope, plan §8.7.1 + §10 spell them out.
 - GitHub Pages deploy workflow (plan §11) — README mentions but no

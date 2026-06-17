@@ -40,13 +40,14 @@ import { buildInspectorPanel } from '@community-credits/core/educational';
 const cfg = await fetch('./config.json').then((r) => r.json());
 
 const POOL_ABI = [
-  // canonical (position, cm) mapping for every appended leaf
-  'event StreamAppended(uint32 indexed position, uint256 cm)',
-  // stream + checkpoint views
-  'function streamCount() view returns (uint32)',
-  'function streamAt(uint32 position) view returns (uint256)',
-  'function checkpointedRoot() view returns (uint256)',
-  'function checkpointedCount() view returns (uint32)',
+  // Insert-bearing events: each carries the commitment(s) and the leaf index
+  // they landed at, so the chat dapp can rebuild the tree mirror from events
+  // alone (no on-chain stream array anymore).
+  'event VoucherCreated(uint256 indexed cm, uint256 value, uint32 expiryEpoch, uint32 leafIndex)',
+  'event Assigned(uint256 indexed nullifier, uint32 indexed expiryEpoch, uint256 cmDest, uint256 cmChange, uint32 destLeafIndex, uint32 changeLeafIndex)',
+  'event Redeemed(uint256 indexed nullifier, uint32 indexed expiryEpoch, address indexed operator, uint256 redeemValue, uint256 cmChange, uint32 changeLeafIndex)',
+  'function nextIndex() view returns (uint32)',
+  'function getLatestRoot() view returns (uint256)',
 ];
 
 const store = await openStore();
@@ -56,12 +57,11 @@ const pool =
     ? new ethers.Contract(cfg.poolAddress, POOL_ABI, provider)
     : null;
 
-// Off-chain mirror of the *checkpointed* Merkle tree. Membership proofs
-// for assign/redeem must verify against `checkpointedRoot`, so the mirror
-// must include exactly the leaves the contract has rolled into the tree
-// (positions [0..checkpointedCount)). Leaves in the stream beyond that
-// are pending — their notes are "not yet spendable" until a checkpointer
-// rolls them in.
+// Off-chain mirror of the on-chain Merkle tree. Commitments are folded into
+// the tree on-chain inside each buy/assign/redeem (no stream, no checkpoint),
+// so a note is spendable as soon as its insert event is observed. The mirror
+// is rebuilt from VoucherCreated / Assigned / Redeemed events, inserting every
+// commitment in leafIndex order so the mirror root matches the chain's.
 const mirror = new IncrementalMerkleTree();
 let mirroredCount = 0;            // # of leaves currently in `mirror`
 const cmToLeafIndex = new Map();  // commitment(decimal string) → uint32
@@ -69,24 +69,32 @@ let rebuildInFlight = null;       // serialize concurrent callers
 
 async function rebuildMirror() {
   if (!pool) return;
-  // Two render paths can call rebuildMirror concurrently; if both observe
-  // the same `mirroredCount` they'll both insert the new leaves and the
-  // mirror ends up with duplicates. Serialize on a shared promise so a
-  // second caller waits for the first to finish (and sees its updated
-  // mirroredCount).
+  // Two render paths can call rebuildMirror concurrently; serialize on a
+  // shared promise so a second caller waits for the first (and sees its
+  // updated mirroredCount) rather than double-inserting the same leaves.
   if (rebuildInFlight) return rebuildInFlight;
   rebuildInFlight = (async () => {
-    // Refresh cm→leafIndex map from StreamAppended events.
-    const evs = await pool.queryFilter('StreamAppended', 0, 'latest');
-    for (const ev of evs) {
-      cmToLeafIndex.set(ev.args.cm.toString(), Number(ev.args.position));
+    // Collect (leafIndex, cm) from every insert-bearing event.
+    const leaves = [];
+    for (const e of await pool.queryFilter('VoucherCreated', 0, 'latest')) {
+      leaves.push({ idx: Number(e.args.leafIndex), cm: e.args.cm });
     }
-    const checkpointed = Number(await pool.checkpointedCount());
-    for (let i = mirroredCount; i < checkpointed; i++) {
-      const cm = await pool.streamAt(i);
+    for (const e of await pool.queryFilter('Assigned', 0, 'latest')) {
+      leaves.push({ idx: Number(e.args.destLeafIndex), cm: e.args.cmDest });
+      leaves.push({ idx: Number(e.args.changeLeafIndex), cm: e.args.cmChange });
+    }
+    for (const e of await pool.queryFilter('Redeemed', 0, 'latest')) {
+      leaves.push({ idx: Number(e.args.changeLeafIndex), cm: e.args.cmChange });
+    }
+    for (const { idx, cm } of leaves) cmToLeafIndex.set(cm.toString(), idx);
+    // Insert any newly-observed leaves in strict index order (indices are
+    // contiguous and assigned by the contract).
+    leaves.sort((a, b) => a.idx - b.idx);
+    for (const { idx, cm } of leaves) {
+      if (idx < mirroredCount) continue; // already mirrored
       await mirror.insert(BigInt(cm));
+      mirroredCount = idx + 1;
     }
-    mirroredCount = checkpointed;
   })();
   try {
     await rebuildInFlight;
@@ -101,11 +109,6 @@ function leafIndexOf(note) {
     throw new Error('commitment not yet observed on-chain — refresh after the buy/assign tx confirms');
   }
   return idx;
-}
-
-async function isCheckpointed(leafIndex) {
-  if (!pool) return false;
-  return leafIndex < Number(await pool.checkpointedCount());
 }
 
 // ---- UI plumbing ----
@@ -208,10 +211,10 @@ let _adminRenderToken = 0;
 // Last-rendered note signature per scope; we only redraw the DOM if it
 // changed. Otherwise a 4s polling loop would visibly blink the list.
 const _lastRenderSig = new Map();
-function noteSig(notes, cid, cpCount) {
+function noteSig(notes, cid, mirroredCount) {
   return JSON.stringify([
     cid,
-    cpCount,
+    mirroredCount,
     notes.map((n) => [n.commitment, n.value?.toString(), n.spent, cmToLeafIndex.get(n.commitment) ?? null]),
   ]);
 }
@@ -220,14 +223,12 @@ async function renderUserNotes() {
   const tok = ++_userRenderToken;
   const notes = await store.list('user');
   if (tok !== _userRenderToken) return;
-  // Pull checkpoint state once so the list reflects spendability.
+  // Refresh the mirror so the list reflects on-chain spendability.
   await rebuildMirror().catch(() => {});
-  if (tok !== _userRenderToken) return;
-  const cpCount = pool ? Number(await pool.checkpointedCount().catch(() => 0n)) : 0;
   if (tok !== _userRenderToken) return;
   // Skip the DOM rewrite if nothing changed — otherwise the polling loop
   // visibly re-paints the list every cycle.
-  const sig = noteSig(notes, 'user', cpCount);
+  const sig = noteSig(notes, 'user', mirroredCount);
   if (_lastRenderSig.get('user') === sig) return;
   _lastRenderSig.set('user', sig);
   const host = $('notesList');
@@ -244,15 +245,14 @@ async function renderUserNotes() {
     const row = document.createElement('div');
     row.className = 'note-row';
     const leafIdx = cmToLeafIndex.get(n.commitment);
-    const pending =
-      !n.spent && (leafIdx === undefined || leafIdx >= cpCount);
+    const pending = !n.spent && leafIdx === undefined;
     const value = BigInt(n.value);
     let status, faceColor;
     if (n.spent) {
       status = '✓ spent';
       faceColor = '#999';
     } else if (pending) {
-      status = '⏳ pending checkpoint';
+      status = '⏳ pending confirmation';
       faceColor = '#c80';
       totalPending += value;
     } else {
@@ -309,9 +309,7 @@ async function renderAdminNotes() {
   if (tok !== _adminRenderToken) return;
   await rebuildMirror().catch(() => {});
   if (tok !== _adminRenderToken) return;
-  const cpCount = pool ? Number(await pool.checkpointedCount().catch(() => 0n)) : 0;
-  if (tok !== _adminRenderToken) return;
-  const sig = noteSig(notes, cid, cpCount);
+  const sig = noteSig(notes, cid, mirroredCount);
   if (_lastRenderSig.get('admin') === sig) return;
   _lastRenderSig.set('admin', sig);
   const host = $('adminNotes');
@@ -324,15 +322,14 @@ async function renderAdminNotes() {
     const row = document.createElement('div');
     row.className = 'note-row';
     const leafIdx = cmToLeafIndex.get(n.commitment);
-    const pending =
-      !n.spent && (leafIdx === undefined || leafIdx >= cpCount);
+    const pending = !n.spent && leafIdx === undefined;
     const value = BigInt(n.value);
     let status, color;
     if (n.spent) {
       status = '✓ spent';
       color = '#999';
     } else if (pending) {
-      status = '⏳ pending checkpoint';
+      status = '⏳ pending confirmation';
       color = '#c80';
       totalPending += value;
     } else {
@@ -401,13 +398,6 @@ async function doAssign() {
   try {
     await rebuildMirror();
     const leafIndex = leafIndexOf(note);
-    if (!(await isCheckpointed(leafIndex))) {
-      throw new Error(
-        `note not yet checkpointed (leafIndex=${leafIndex}, ` +
-          `checkpointedCount=${await pool.checkpointedCount()}); ` +
-          `wait for the next checkpoint and retry`,
-      );
-    }
     const { pathElements, pathIndices, root } = await mirror.proof(leafIndex);
     const sk = BigInt(note.sk);
     const value = BigInt(note.value);
@@ -513,13 +503,6 @@ async function doRedeem() {
   try {
     await rebuildMirror();
     const leafIndex = leafIndexOf(note);
-    if (!(await isCheckpointed(leafIndex))) {
-      throw new Error(
-        `note not yet checkpointed (leafIndex=${leafIndex}, ` +
-          `checkpointedCount=${await pool.checkpointedCount()}); ` +
-          `wait for the next checkpoint and retry`,
-      );
-    }
     const { pathElements, pathIndices, root } = await mirror.proof(leafIndex);
     const sk = BigInt(note.sk);
     const value = BigInt(note.value);
@@ -753,7 +736,7 @@ if (!(await store.getKey('user'))) {
   console.log('generated user pkHash =', k.ownerPkHash.toString());
 }
 
-// Polling loop: catch on-chain changes (new checkpoints flipping a note
+// Polling loop: catch on-chain changes (new insert events flipping a note
 // from "pending" to spendable, new VoucherCreated/Assigned events, etc.)
 // without forcing the user to reload.
 setInterval(() => {

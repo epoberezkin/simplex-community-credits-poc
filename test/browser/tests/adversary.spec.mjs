@@ -9,7 +9,7 @@
 import { test, expect } from '@playwright/test';
 import { ethers } from 'ethers';
 import { buyerWallet, relayWallet } from '../../../tools/keys.mjs';
-import { readDeployManifest, runCheckpointer } from '../support/runtime.mjs';
+import { readDeployManifest } from '../support/runtime.mjs';
 
 const PURCHASER = 'http://localhost:5173';
 const CHAT      = 'http://localhost:5174';
@@ -38,7 +38,6 @@ test.describe.serial('adversary scenarios', () => {
     await buyerPage.click('#goBuy');
     await buyerPage.locator('#result').waitFor({ state: 'visible', timeout: 120_000 });
     importLink = await buyerPage.locator('#chatLink').getAttribute('href');
-    runCheckpointer({ target: 'hardhat' });
     await ctx.close();
   });
 
@@ -142,7 +141,6 @@ test.describe.serial('adversary scenarios', () => {
   //    Circuit's new changeValue range check rejects the witness.
   // ---------------------------------------------------------------------
   test('redeem with redeemValue > note value is rejected at witness-gen', async ({ browser }) => {
-    runCheckpointer({ target: 'hardhat' });  // ensure cmDest is checkpointed
     const ctx = await browser.newContext();
     const adminPage = await ctx.newPage();
     adminPage.on('console', (m) => console.log(`[chat-admin] ${m.text()}`));

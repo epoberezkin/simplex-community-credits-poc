@@ -13,7 +13,7 @@ export {
 } from './crypto.js';
 export { redeemerHashFromId, demoCommunitySk, demoCommunityPkHash } from './identity.js';
 export { IncrementalMerkleTree, DEFAULT_DEPTH } from './merkle.js';
-export { buildCheckpointInput, B_MAX as CHECKPOINT_BATCH_MAX } from './checkpoint.js';
+export { poseidonT3Bytecode } from './poseidon-contract.js';
 export {
   encodeNote,
   decodeNote,

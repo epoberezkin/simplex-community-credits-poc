@@ -30,10 +30,8 @@ import {
   buildAssignLink,
   buildRedeemLink,
   parseDeepLink,
-  buildCheckpointInput,
-  CHECKPOINT_BATCH_MAX,
 } from '@community-credits/core';
-import { proveCreate, proveAssign, proveRedeem, proveCheckpoint } from '@community-credits/core/proof';
+import { proveCreate, proveAssign, proveRedeem } from '@community-credits/core/proof';
 
 import { deployAll } from './deploy.mjs';
 import {
@@ -247,8 +245,8 @@ async function main() {
 
   // pallet-revive's eth-rpc estimateGas under-budgets contract calls that
   // hit ecPairing precompile + storage + external calls (our Groth16 verifier
-  // + Poseidon Merkle insert burns far more PVM weight than EVM gas would
-  // suggest). Bypass eth_estimateGas by passing an explicit cap on every tx.
+  // + on-chain 20-Poseidon Merkle insert burns far more REVM weight than the
+  // EVM gas estimate suggests). Bypass eth_estimateGas with an explicit cap.
   const TX_GAS = target === 'chopsticks' ? 100_000_000n : undefined;
   const callOpts = TX_GAS ? { gasLimit: TX_GAS } : {};
 
@@ -283,38 +281,25 @@ async function main() {
   }
   const wrap = (label, payer, sendFn) => measured(label, payer, sendFn);
 
-  // Local mirror of the *checkpointed* tree state. Updated only after a
-  // checkpoint is submitted on-chain. The chat dapp rebuilds the same
-  // mirror by replaying VoucherCreated / Assigned / Redeemed events up to
-  // the latest Checkpointed event.
+  // Local mirror of the on-chain tree. Now that each buy/assign/redeem folds
+  // its commitment(s) into the tree immediately (no stream, no checkpoint), the
+  // mirror is updated in lock-step right after every tx, in the same insert
+  // order the contract uses. The chat dapp rebuilds the same mirror by
+  // replaying VoucherCreated / Assigned / Redeemed events in leafIndex order.
   const mirror = new IncrementalMerkleTree();
-  // Commitments streamed but not yet rolled into a checkpoint.
-  const pendingStream = []; // bigint[]
   // Per-subject note stores.
   const userAStore       = new NoteStore();
   const userBStore       = new NoteStore();
   const communityAStore  = new NoteStore();
   const communityBStore  = new NoteStore();
 
-  // Drain the pendingStream in batches of CHECKPOINT_BATCH_MAX (8) per
-  // extrinsic — one SNARK + one verifier call amortised across up to 8
-  // leaves. See issue #2 (batching) and #3 (frontier on-chain).
-  // Bills checkpointing to relayA since both relays are valid checkpointers.
-  async function drainCheckpoints() {
-    while (pendingStream.length > 0) {
-      const oldCount = Number(await pool.checkpointedCount());
-      const n = Math.min(pendingStream.length, CHECKPOINT_BATCH_MAX);
-      const batch = pendingStream.slice(0, n);
-      const { input } = await buildCheckpointInput({ mirror, cms: batch, oldCount });
-      const { proofFlat } = await proveCheckpoint(input);
-      const { pA, pB, pC } = unpackProof(proofFlat);
-      await wrap(`checkpoint(n=${n})`, relayAAddr, () =>
-        pool.connect(relayA).checkpoint(
-          input.newRoot, input.newFrontier, n, pA, pB, pC, callOpts,
-        ),
-      );
-      pendingStream.splice(0, n);
-    }
+  // After each insert the on-chain root must equal the off-chain mirror root,
+  // and that root must be accepted by the contract's recent-roots ring.
+  async function assertRootsAgree() {
+    const onChain = BigInt(await pool.getLatestRoot());
+    const local = await mirror.root();
+    assertEq(onChain, local, 'merkle root (on-chain vs mirror)');
+    assertOk(await pool.isKnownRoot(onChain), 'latest root is a known root');
   }
 
   // ----------------------------------------------------------- 2x2x2 flow ---
@@ -368,7 +353,7 @@ async function main() {
       .map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
       .find((p) => p && p.name === 'VoucherCreated');
     assertOk(ev, `VoucherCreated event (${label})`);
-    pendingStream.push(cm);
+    await mirror.insert(cm);
     return {
       commitment: cm.toString(), leafIndex: Number(ev.args.leafIndex),
       sk: userKp.sk, ownerPkHash: userKp.ownerPkHash, randomness: r,
@@ -411,7 +396,9 @@ async function main() {
       .map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
       .find((p) => p && p.name === 'Assigned');
     assertOk(ev, `Assigned event (${label})`);
-    pendingStream.push(cmDest, cmChange);
+    // On-chain inserts cmDest then cmChange — mirror must match that order.
+    await mirror.insert(cmDest);
+    await mirror.insert(cmChange);
     return {
       destEntry: {
         commitment: cmDest.toString(), leafIndex: Number(ev.args.destLeafIndex),
@@ -458,7 +445,7 @@ async function main() {
       .map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
       .find((p) => p && p.name === 'Redeemed');
     assertOk(ev, `Redeemed event (${label})`);
-    pendingStream.push(cmChange);
+    await mirror.insert(cmChange);
     return {
       commitment: cmChange.toString(), leafIndex: Number(ev.args.changeLeafIndex),
       sk: src.sk, ownerPkHash: src.ownerPkHash, randomness: changeRandomness,
@@ -474,10 +461,10 @@ async function main() {
       userANote = await doBuy(userAKp, buyerA, buyerAAddr, 'userA');
       userAStore.add(userANote);
     } catch (e) {
-      // First on-chain tx — abort cascade if it fails (e.g. stale PVM
-      // verifier on chopsticks). Rest of the steps depend on it.
+      // First on-chain tx — abort cascade if it fails (e.g. a verifier /
+      // Poseidon address mismatch). Rest of the steps depend on it.
       e.abortRest = true;
-      e.abortReason = 'first buyAndCreate failed — see test/e2e/deploy.mjs::assertPvmArtifactsFresh()';
+      e.abortReason = 'first buyAndCreate failed — check verifier + PoseidonT3 deploy';
       throw e;
     }
   });
@@ -485,9 +472,9 @@ async function main() {
     userBNote = await doBuy(userBKp, buyerB, buyerBAddr, 'userB');
     userBStore.add(userBNote);
   });
-  await step('checkpoint after buys (drain 2)', async () => {
-    await drainCheckpoints();
-    assertEq(await pool.checkpointedCount(), 2n, 'checkpointedCount=2');
+  await step('both buys are inserted + spendable immediately', async () => {
+    assertEq(await pool.nextIndex(), 2n, 'nextIndex=2');
+    await assertRootsAgree();
   });
 
   // -------- assign round 1: each user → commA, value 20 --------
@@ -508,9 +495,9 @@ async function main() {
     communityAStore.add(r.destEntry);
     userBChange = r.changeEntry;
   });
-  await step('checkpoint after commA assigns (drain 4)', async () => {
-    await drainCheckpoints();
-    assertEq(await pool.checkpointedCount(), 6n, 'checkpointedCount=6');
+  await step('commA assigns inserted (nextIndex=6)', async () => {
+    assertEq(await pool.nextIndex(), 6n, 'nextIndex=6');
+    await assertRootsAgree();
   });
 
   // -------- assign round 2: each user → commB, value 30 (from change) --------
@@ -528,9 +515,9 @@ async function main() {
     userBStore.add(r.changeEntry);
     communityBStore.add(r.destEntry);
   });
-  await step('checkpoint after commB assigns (drain 4)', async () => {
-    await drainCheckpoints();
-    assertEq(await pool.checkpointedCount(), 10n, 'checkpointedCount=10');
+  await step('commB assigns inserted (nextIndex=10)', async () => {
+    assertEq(await pool.nextIndex(), 10n, 'nextIndex=10');
+    await assertRootsAgree();
   });
 
   // -------- redeem phase: each community → 5 to relayA, 8 to relayB --------
@@ -557,9 +544,9 @@ async function main() {
     await doRedeem(entry, communityBId, REDEEM_TO_RB, relayB, relayBAddr, 'commB→relayB');
     communityBStore.markSpent(entry.commitment);
   });
-  await step('checkpoint after redeems (drain 4)', async () => {
-    await drainCheckpoints();
-    assertEq(await pool.checkpointedCount(), 14n, 'checkpointedCount=14');
+  await step('redeem change notes inserted (nextIndex=14)', async () => {
+    assertEq(await pool.nextIndex(), 14n, 'nextIndex=14');
+    await assertRootsAgree();
   });
 
   // -------- on-chain credit + per-relay withdraw --------
@@ -609,85 +596,58 @@ async function main() {
     assertEq(unspent + credits, deposited - withdrawn, 'solvency');
   });
 
-  // -------- adversary cases for the batched checkpoint --------
-  // Hardhat-only: revert-reason matching relies on eth_estimateGas
-  // running the tx in simulation and throwing the reason string. On
-  // pallet-revive with explicit gasLimit, ethers bypasses estimation and
-  // the tx gets mined with status=0 without throwing — the test can't
-  // detect the revert inline. Contract logic is the same either way; we
-  // just can't observe it from JS on chopsticks.
+  // -------- adversary cases --------
+  // Hardhat-only: revert-reason matching relies on eth_estimateGas running
+  // the tx in simulation and throwing the reason string. On pallet-revive
+  // with an explicit gasLimit, ethers bypasses estimation and the tx is mined
+  // with status=0 without throwing — the test can't observe the revert inline.
+  // Contract logic is identical; we just can't see the reason from JS on
+  // chopsticks.
   if (target === 'hardhat') {
-    await step('extra userA buy seeds 1 pending leaf', async () => {
-      const extraNote = await doBuy(userAKp, buyerA, buyerAAddr, 'userA-extra');
-      userAStore.add(extraNote);
-    });
-    await step('checkpoint(count=0) reverts ckp/no-progress', { pure: true }, async () => {
-      const zeroFrontier = new Array(20).fill(0n);
-      const zeroProof = { pA: [0n, 0n], pB: [[0n, 0n], [0n, 0n]], pC: [0n, 0n] };
-      try {
-        await pool.connect(relayA).checkpoint(
-          0n, zeroFrontier, 0, zeroProof.pA, zeroProof.pB, zeroProof.pC, callOpts,
-        );
-        throw new Error('expected revert');
-      } catch (e) {
-        assertOk(/no-progress/.test(e.message), `got: ${e.message}`);
-      }
-    });
-    await step('checkpoint(count=9 > B_MAX) reverts ckp/batch-size', { pure: true }, async () => {
-      const zeroFrontier = new Array(20).fill(0n);
-      const zeroProof = { pA: [0n, 0n], pB: [[0n, 0n], [0n, 0n]], pC: [0n, 0n] };
-      try {
-        await pool.connect(relayA).checkpoint(
-          0n, zeroFrontier, 9, zeroProof.pA, zeroProof.pB, zeroProof.pC, callOpts,
-        );
-        throw new Error('expected revert');
-      } catch (e) {
-        assertOk(/batch-size/.test(e.message), `got: ${e.message}`);
-      }
-    });
-    await step('checkpoint(fabricated newFrontier) reverts ckp/proof', { pure: true }, async () => {
-      const oldCount = Number(await pool.checkpointedCount());
-      const cm = pendingStream[0];
-      const probeMirror = new IncrementalMerkleTree();
-      await probeMirror._ensureInit();
-      probeMirror.filledSubtrees = (await pool.checkpointedFrontier()).map((x) => BigInt(x));
-      probeMirror._root = BigInt(await pool.checkpointedRoot());
-      probeMirror.leaves = new Array(oldCount).fill(0n);
-      const { input } = await buildCheckpointInput({ mirror: probeMirror, cms: [cm], oldCount });
-      const { proofFlat } = await proveCheckpoint(input);
+    await step('double-spend (reused nullifier) reverts pool/nullifier', { pure: true }, async () => {
+      // userANote was already spent in the round-1 assign. Re-proving an
+      // assign for it yields the same nullifier (Poseidon(sk, cm)), which the
+      // contract has already recorded.
+      const { pathElements, pathIndices, root } = await mirror.proof(userANote.leafIndex);
+      const nullifier = await deriveNullifier(userANote.sk, BigInt(userANote.commitment));
+      const dR = randomFieldElement();
+      const cR = randomFieldElement();
+      const cmDest = await deriveCommitment({
+        value: TO_COMM_A, expiryEpoch, ownerPkHash: communityAKp.ownerPkHash,
+        randomness: dR, assigned: 1n, redeemerHash: redeemerHashA,
+      });
+      const cmChange = await deriveCommitment({
+        value: userANote.value - TO_COMM_A, expiryEpoch,
+        ownerPkHash: userANote.ownerPkHash, randomness: cR, assigned: 0n, redeemerHash: 0n,
+      });
+      const { proofFlat } = await proveAssign({
+        sk: userANote.sk, value: userANote.value, expiryEpoch, randomness: userANote.randomness,
+        pathElements, pathIndices, destValue: TO_COMM_A,
+        destOwnerPkHash: communityAKp.ownerPkHash, destRandomness: dR,
+        redeemerId: communityAId, changeRandomness: cR, root,
+        nullifier, expiryEpochPub: expiryEpoch, cmDest, cmChange,
+      });
       const { pA, pB, pC } = unpackProof(proofFlat);
-      const tampered = [...input.newFrontier];
-      tampered[0] = tampered[0] ^ 1n;
       try {
-        await pool.connect(relayA).checkpoint(
-          input.newRoot, tampered, 1, pA, pB, pC, callOpts,
+        await pool.connect(relayA).assign(
+          nullifier, expiryEpoch, cmDest, cmChange, root, pA, pB, pC, callOpts,
         );
         throw new Error('expected revert');
       } catch (e) {
-        assertOk(/ckp\/proof/.test(e.message), `got: ${e.message}`);
+        assertOk(/nullifier/.test(e.message), `got: ${e.message}`);
       }
     });
-    await step('permissionless: random key submits valid checkpoint', async () => {
-      const stranger = new ethers.NonceManager(
-        new ethers.Wallet(ethers.hexlify(ethers.randomBytes(32)), provider)
-      );
-      const strangerAddr = await stranger.getAddress();
-      await provider.send('hardhat_setBalance', [
-        strangerAddr, '0xDE0B6B3A7640000',
-      ]);
-      const oldCount = Number(await pool.checkpointedCount());
-      const cm = pendingStream[0];
-      const { input } = await buildCheckpointInput({ mirror, cms: [cm], oldCount });
-      const { proofFlat } = await proveCheckpoint(input);
-      const { pA, pB, pC } = unpackProof(proofFlat);
-      const txr = await wrap('stranger checkpoint', strangerAddr, () =>
-        pool.connect(stranger).checkpoint(
-          input.newRoot, input.newFrontier, 1, pA, pB, pC, callOpts,
-        ),
-      );
-      assertOk(txr.status === 1, 'tx succeeded');
-      pendingStream.shift();
-      assertEq(await pool.checkpointedCount(), BigInt(oldCount + 1), 'cp advanced');
+    await step('unknown root reverts pool/root', { pure: true }, async () => {
+      const bogusRoot = 0x1234n; // never inserted → not in the recent-roots ring
+      const zP = { pA: [0n, 0n], pB: [[0n, 0n], [0n, 0n]], pC: [0n, 0n] };
+      try {
+        await pool.connect(relayA).assign(
+          1n, expiryEpoch, 2n, 3n, bogusRoot, zP.pA, zP.pB, zP.pC, callOpts,
+        );
+        throw new Error('expected revert');
+      } catch (e) {
+        assertOk(/pool\/root/.test(e.message), `got: ${e.message}`);
+      }
     });
     await step('post-adversary solvency still holds', async () => {
       const deposited  = await pool.deposited();

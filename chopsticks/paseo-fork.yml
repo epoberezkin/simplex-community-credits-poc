@@ -1,0 +1,105 @@
+# Chopsticks fork of Paseo Asset Hub.
+#
+# This fork lets us:
+#   - exercise the pallet_assets stablecoin + ERC20-precompile path
+#   - replay against the same runtime + storage shape the real network has
+#   - prefund test accounts (Alice + a buyer/relay EOA derived from the
+#     PASEO_DEV_MNEMONIC env var or the well-known Hardhat #0 EVM key) so the
+#     E2E harness can sign txs without faucet wait
+#
+# Usage:
+#   npx @acala-network/chopsticks --config chopsticks/paseo-asset-hub.yml
+#
+# The eth-rpc bridge sits in front of the substrate RPC and translates
+# eth_* JSON-RPC calls into pallet-revive extrinsics. For the PoC we run it
+# separately (see chopsticks/run.sh).
+
+endpoint:
+  - wss://asset-hub-paseo-rpc.n.dwellir.com
+mock-signature-host: true
+db: ./chopsticks/paseo-fork.sqlite
+block: 10112140
+
+import-storage:
+  System:
+    Account:
+      # Alice  (sudo, prefunded)
+      - - - 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+      # Bob
+      - - - 5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+
+      # Pallet-revive maps an EVM address to AccountId32 by
+      #   account_id = h160_address || 0xee * 12
+      # We prefund the substrate-side of the three Hardhat default EVM keys
+      # used by test/e2e/flow.test.mjs so the eth-rpc bridge can let them
+      # pay gas on the forked chain.
+      #
+      # We can't use the well-known Hardhat default accounts because the #0
+      # key has been used on Paseo already — its CREATE@nonce-0 address
+      # collides with an existing contract and pallet-revive errors with
+      # `DuplicateContract`. The chopsticks fork inherits that state and we
+      # can't bump the EVM-side nonce via System.Account.nonce alone
+      # (pallet-revive keeps its own AccountInfo nonce).
+      #
+      # Instead derive deterministic keys from PoC-unique seeds:
+      #   keccak256("simplex-community-credits-poc-{deployer,buyer,buyer-b,relay,relay-b}-v1")
+      # and prefund the substrate-mapped AccountId32 of each (last 12 bytes
+      # 0xee per pallet-revive's address mapping).
+      #
+      # deployer  pk 0x8f59… → EVM 0xB60659fd4F6805C957743321b3f6abc4bE1cEb41
+      - - - '0xb60659fd4f6805c957743321b3f6abc4be1ceb41eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+      # buyer     pk 0x72a4… → EVM 0x23D9453A70370DE312825458b7E49539871025EB
+      - - - '0x23d9453a70370de312825458b7e49539871025ebeeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+      # relay     pk 0x1a7c… → EVM 0x648Ab6972643980163C0EA116A452f188512B624
+      - - - '0x648ab6972643980163c0ea116a452f188512b624eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+      # buyer-b   pk 0xe6cb… → EVM 0x58B27Df274Bd56aCA17c221dC7FACe4380225762
+      - - - '0x58b27df274bd56aca17c221dc7face4380225762eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+      # relay-b   pk 0x84cb… → EVM 0xD60ca14FEe3F9E1343c420589c0678eF451Ee429
+      - - - '0xd60ca14fee3f9e1343c420589c0678ef451ee429eeeeeeeeeeeeeeeeeeeeeeee'
+        - providers: 1
+          data:
+            free: '1000000000000000000'
+
+  Assets:
+    Account:
+      # tUSDC asset id 1984 — same convention as USDT on Asset Hub
+      - [ [ 1984, 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY ], { balance: 1000000000000 } ]
+      - [ [ 1984, 5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty ], { balance: 1000000000000 } ]
+      # Both buyer EOAs need tUSDC for buyAndCreate.
+      - [ [ 1984, '0x23d9453a70370de312825458b7e49539871025ebeeeeeeeeeeeeeeeeeeeeeeee' ], { balance: 1000000000000 } ]
+      - [ [ 1984, '0x58b27df274bd56aca17c221dc7face4380225762eeeeeeeeeeeeeeeeeeeeeeee' ], { balance: 1000000000000 } ]
+    Asset:
+      - [ [ 1984 ], {
+          owner: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,
+          issuer: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,
+          admin: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,
+          freezer: 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY,
+          supply: 3000000000000,
+          deposit: 1000000000000,
+          minBalance: 1,
+          isSufficient: true,
+          accounts: 3,
+          sufficients: 0,
+          approvals: 0,
+          status: 'Live'
+        } ]
+    Metadata:
+      - [ [ 1984 ], { deposit: 0, name: '0x546573742055534443', symbol: '0x7455534443', decimals: 6, isFrozen: false } ]

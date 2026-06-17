@@ -1,7 +1,7 @@
 // Shared lifecycle helpers for the browser-e2e test:
 //   - detect / boot chopsticks + eth-rpc
 //   - persist "did we start it" state so teardown only kills what we started
-//   - thin wrapper around tools/deploy.mjs + tools/checkpoint.mjs
+//   - thin wrapper around tools/deploy.mjs
 
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -149,16 +149,6 @@ export function runDeploy({ ethRpcUrl, target = 'hardhat' } = {}) {
   // cap. Let deploy.mjs use ethers's auto-estimate on hardhat.
   if (target === 'hardhat') env.TX_GAS = '15000000';
   execFileSync('node', ['tools/deploy.mjs'], {
-    cwd: REPO_ROOT,
-    stdio: 'inherit',
-    env,
-  });
-}
-
-export function runCheckpointer({ target = 'hardhat' } = {}) {
-  const env = { ...process.env };
-  if (target === 'hardhat') env.TX_GAS = '15000000';
-  execFileSync('node', ['tools/checkpoint.mjs'], {
     cwd: REPO_ROOT,
     stdio: 'inherit',
     env,

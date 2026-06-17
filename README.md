@@ -16,9 +16,18 @@ packages/
 test/e2e/        Node E2E harness (TARGET=hardhat | chopsticks)
 test/browser/    Playwright browser e2e — full happy path + adversary suite
 chopsticks/      YAML configs to fork Polkadot / Paseo Asset Hub locally
-tools/           demo orchestrator, deployer, checkpointer, event subscriber
+tools/           demo orchestrator, deployer, event subscriber
 docs/            tutorial + gas-design notes
 ```
+
+> **Design:** every `buyAndCreate` / `assign` / `redeem` folds its
+> commitment(s) into an on-chain Tornado-style Merkle tree in the same tx
+> (on-chain Poseidon inserts), so notes are spendable as soon as the tx
+> lands. The contracts run as plain EVM bytecode — locally on Hardhat and on
+> pallet-revive's REVM on a chopsticks-forked Asset Hub (no resolc/PVM, no
+> checkpoint step). The original stream + permissionless-checkpoint design
+> was dropped after measurement showed the on-chain inserts run fine under
+> REVM.
 
 ## Quick Start
 
@@ -46,9 +55,10 @@ docs/            tutorial + gas-design notes
   
 
 Hardhat downloads `solc` automatically on first `contracts` build — no
-separate install needed for the quick-start path. (`resolc` + `eth-rpc`
-are only needed for the chopsticks/pallet-revive flow — see
-[`docs/tutorial.md`](./docs/tutorial.md) §0.1.)
+separate install needed for the quick-start path. (`eth-rpc` is only needed
+for the chopsticks/pallet-revive flow — see
+[`docs/tutorial.md`](./docs/tutorial.md) §0.1. There is no `resolc`/PVM step
+anymore: the same EVM bytecode runs locally and under pallet-revive REVM.)
 
 ### Run
 
@@ -56,52 +66,54 @@ are only needed for the chopsticks/pallet-revive flow — see
 pnpm install
 pnpm --filter circuits  run build       # compile circuits + trusted setup + verifier export (~5 min first time)
 pnpm --filter contracts run build       # hardhat compile
-pnpm --filter e2e       run test        # full flow on hardhat-local (~10 s)
+pnpm --filter e2e       run test        # full flow on hardhat-local (~30 s)
 ```
 
-Expected logs explain all necessary steps for a full voucher flow: 
+Expected logs walk through a full voucher flow. Each buy/assign/redeem
+inserts its commitment(s) into the on-chain tree in the same tx, so the
+`nextIndex` assertions confirm immediate spendability — there are no
+checkpoint steps:
 ```
 starting hardhat node…
   pool   : 0x5FC8d32690cc91D4c39d9d3abcBD16989F875707
   tUSDC  : 0x5FbDB2315678afecb367f032d93F642f64180aa3
-• Dapp A — userA buys 100 tUSDC … ok (683 ms)
-• Dapp A — userB buys 100 tUSDC … ok (368 ms)
-• checkpoint after buys (drain 2) … ok (2093 ms)
-• userA → commA assign 20 … ok (514 ms)
-• userB → commA assign 20 … ok (525 ms)
-• checkpoint after commA assigns (drain 4) … ok (2076 ms)
-• userA → commB assign 30 (from change) … ok (569 ms)
-• userB → commB assign 30 (from change) … ok (542 ms)
-• checkpoint after commB assigns (drain 4) … ok (2174 ms)
-• commA → relayA redeem 5 … ok (534 ms)
-• commA → relayB redeem 8 … ok (545 ms)
-• commB → relayA redeem 5 … ok (616 ms)
-• commB → relayB redeem 8 … ok (496 ms)
-• checkpoint after redeems (drain 4) … ok (2141 ms)
-• credit balances are 10 (relayA) and 16 (relayB) … ok (33 ms)
-• relayA withdraws 10 … ok (177 ms)
-• relayB withdraws 16 … ok (200 ms)
-• solvency invariant holds … ok (90 ms)
-• extra userA buy seeds 1 pending leaf … ok (400 ms)
-• checkpoint(count=0) reverts ckp/no-progress … ok (38 ms)
-• checkpoint(count=9 > B_MAX) reverts ckp/batch-size … ok (28 ms)
-• checkpoint(fabricated newFrontier) reverts ckp/proof … ok (2069 ms)
-• permissionless: random key submits valid checkpoint … ok (2248 ms)
-• post-adversary solvency still holds … ok (87 ms)
-• codec round-trip is byte-exact … ok (3 ms)
+• Dapp A — userA buys 100 tUSDC … ok
+• Dapp A — userB buys 100 tUSDC … ok
+• both buys are inserted + spendable immediately … ok
+• userA → commA assign 20 … ok
+• userB → commA assign 20 … ok
+• commA assigns inserted (nextIndex=6) … ok
+• userA → commB assign 30 (from change) … ok
+• userB → commB assign 30 (from change) … ok
+• commB assigns inserted (nextIndex=10) … ok
+• commA → relayA redeem 5 … ok
+• commA → relayB redeem 8 … ok
+• commB → relayA redeem 5 … ok
+• commB → relayB redeem 8 … ok
+• redeem change notes inserted (nextIndex=14) … ok
+• credit balances are 10 (relayA) and 16 (relayB) … ok
+• relayA withdraws 10 … ok
+• relayB withdraws 16 … ok
+• solvency invariant holds … ok
+• double-spend (reused nullifier) reverts pool/nullifier … ok
+• unknown root reverts pool/root … ok
+• post-adversary solvency still holds … ok
+• codec round-trip is byte-exact … ok
 
 ── Gas summary by action (avg per tx) ──
-  checkpoint                 804958 gas/tx (relay)  [5 txs, <=3 per flow]
-  operator withdraw           69930 gas/tx (relay)  [2 txs]
-  stablecoin approval         46095 gas/tx (user )  [3 txs, once per account]
-  voucher assignment         332704 gas/tx (relay)  [4 txs]
-  voucher issuance           315497 gas/tx (user )  [3 txs]
-  voucher redemption         340730 gas/tx (relay)  [4 txs]
+  operator withdraw           69953 gas/tx (relay)  [2 txs]
+  stablecoin approval         46095 gas/tx (user )  [2 txs, once per account]
+  voucher assignment        1670370 gas/tx (relay)  [4 txs]
+  voucher issuance          1066769 gas/tx (user )  [2 txs]
+  voucher redemption        1068379 gas/tx (relay)  [4 txs]
 
-25/25 steps passed
+22/22 steps passed
 ```
 
-(Numbers shift slightly between runs; the categories and order are stable.)
+These are raw **hardhat EVM** gas units — large because the on-chain
+Poseidon Merkle insert (20 hashes per leaf) now happens inside each tx. On
+pallet-revive's REVM the metered cost is far lower (see "Chopsticks e2e
+tests" below). Numbers shift slightly between runs; categories are stable.
 
 ## Local Interactive Demo
 
@@ -154,10 +166,10 @@ voucher lifecycle for one user and one community:
 
 1. **Purchaser tab** — enter `value=100`, `expiryEpoch=9999`, click **Buy**.
 2. **Purchaser tab** — click the emitted `Open in chat dapp →` link to import the note.
-3. **Chat tab (User mode)** — wait ~5 s for the new voucher to flip from `⏳ pending checkpoint` to `✓ spendable`.
+3. **Chat tab (User mode)** — wait ~5 s for the new voucher to flip from `⏳ pending confirmation` to `✓ spendable` (the dapp polls for the on-chain insert event).
 4. **Chat tab (User mode)** — pick the voucher, pick **Community A**, set **Dest value = 60**, click **Prove + open in relay**.
 5. **Relay tab** — paste the relay URL from chat into the queue input, then **Submit** to land the assign tx on chain.
-6. **Chat tab (User mode)** — observe: the original 100 voucher is `✓ spent`; a 40-value change voucher appears (after the next checkpoint).
+6. **Chat tab (User mode)** — observe: the original 100 voucher is `✓ spent`; a 40-value change voucher appears and is spendable once the assign tx confirms.
 7. **Chat tab** — click the `Community-import link →` from step 4's assign-result panel.
 8. **Chat tab (Community admin mode)** — wait for the dest voucher to become `✓ redeemable`, then pick it, pick **Relay A**, click **Prove + open in relay**.
 9. **Relay tab** — paste the redeem URL, **Submit**, then **Withdraw all credit**.
@@ -196,7 +208,6 @@ In the demo terminal you'll see, in order:
 
 - per-contract deploy lines with gas + tx hash and a deployer-cost total
 - `[events] VoucherPool.VoucherCreated(...)` after the buy
-- `[checkpoint] cp #N ok` lines as the watcher drains the stream
 - `[events] balance buyer DOT -…` and `[events] balance buyer tUSDC -100` after the buy
 - `[events] VoucherPool.Assigned(...)` after the relay submit
 - `[events] VoucherPool.Redeemed(...)` after the redeem submit
@@ -215,12 +226,9 @@ directly (same code paths the three dapps use), but never spins up a
 browser. For the UI-driven variant see "Playwright UI variant" below.
 
 ```bash
-# one-time / after every circuits-or-contracts rebuild: compile PVM bytecode
-node contracts/scripts/compile-resolc.mjs                   # ~16s; needed for pallet-revive
-
-# in one terminal:
-# clean up with `rm -f ~/.local/share/eth-rpc/eth-rpc.db*`
-CHAIN=polkadot bash chopsticks/run.sh                       # boots chopsticks + eth-rpc
+# in one terminal — boot chopsticks + the eth-rpc bridge:
+# (delete a stale receipt db first: rm -f ~/.local/share/eth-rpc/eth-rpc.db*)
+CHAIN=polkadot bash chopsticks/run.sh
 
 # in another, once chopsticks is up:
 pnpm --filter e2e run test:chopsticks                       # full flow + fee report
@@ -228,54 +236,47 @@ pnpm --filter e2e run test:chopsticks                       # full flow + fee re
 # now, be patient, it will take a while.....
 ```
 
-> **Why the PVM compile step?** Pallet-revive deploys PolkaVM bytecode,
-> not EVM. `pnpm --filter contracts run build` produces only EVM artifacts
-> (for hardhat); `compile-resolc.mjs` regenerates the matching PVM blobs
-> in `contracts/artifacts-pvm/`. If you skip this after a circuits
-> ceremony, the deployed verifier is from the previous build and rejects
-> every new proof — `buyAndCreate` reverts with `pool/proof`. The e2e
-> harness detects the mismatch via an mtime check and errors with a hint.
+> **No PVM/resolc step.** The same hardhat-built EVM bytecode is deployed to
+> the fork and run by pallet-revive's REVM. `TARGET=chopsticks` only changes
+> the RPC endpoint (the eth-rpc bridge) and passes an explicit gas limit
+> (eth-rpc under-budgets `eth_estimateGas` for the Groth16 verify + on-chain
+> Poseidon insert). See [`CLAUDE.md`](./CLAUDE.md) "Chopsticks" for fork
+> gotchas (chopsticks `@latest`, `--build-block-mode Instant`).
 
 The harness ends with three blocks of output — per-tx fee detail, a
 by-subject roll-up, and a gas-by-action roll-up:
 
 ```
-── Fee summary (chopsticks fork of Polkadot Asset Hub, per flow, 2 flows) ──
-  Inclusion fee/flow:   1.373e-1 DOT
+── Fee summary (chopsticks fork of Polkadot/Paseo Asset Hub, per flow, 2 flows) ──
+  Inclusion fee/flow:   1.102e-1 DOT
   Storage deposit/flow:        0 DOT
-  All-in/flow:          1.373e-1 DOT  ($0.1785 @ DOT=$1.3)
-  Blockspace/flow:      gas=171670  block-fraction=3.66%  full-flows/block=27
+  All-in/flow:          1.102e-1 DOT  ($0.1432 @ DOT=$1.3)
+  Blockspace/flow:      gas=110190  block-fraction=2.35%  full-flows/block=42
   (Per-block normal gas budget = 4687500 = MAX_BLOCK_WEIGHT × NORMAL_DISPATCH_RATIO / GasScale.)
 
 ── Fee summary by subject (avg per tx) ──
-  checkpointer    gas=     38352/tx  fee=   3.068e-2 DOT  deposit=          0 DOT  all-in=   3.068e-2 DOT  ($0.0399)  [4 txs]
-  relayA          gas=     15613/tx  fee=   1.249e-2 DOT  deposit=          0 DOT  all-in=   1.249e-2 DOT  ($0.0162)  [7 txs]
-  relayB          gas=     12354/tx  fee=   9.884e-3 DOT  deposit=          0 DOT  all-in=   9.884e-3 DOT  ($0.0128)  [3 txs]
-  userA           gas=     14191/tx  fee=   1.135e-2 DOT  deposit=          0 DOT  all-in=   1.135e-2 DOT  ($0.0148)  [2 txs]
-  userB           gas=      7593/tx  fee=   6.075e-3 DOT  deposit=          0 DOT  all-in=   6.075e-3 DOT  ($0.0079)  [2 txs]
+  relayA          gas=     20463/tx  fee=   2.046e-2 DOT  deposit=          0 DOT  all-in=   2.046e-2 DOT  ($0.0266)  [7 txs]
+  relayB          gas=     12388/tx  fee=   1.239e-2 DOT  deposit=          0 DOT  all-in=   1.239e-2 DOT  ($0.0161)  [3 txs]
+  userA           gas=     12655/tx  fee=   1.266e-2 DOT  deposit=          0 DOT  all-in=   1.266e-2 DOT  ($0.0165)  [2 txs]
+  userB           gas=      7330/tx  fee=   7.331e-3 DOT  deposit=          0 DOT  all-in=   7.331e-3 DOT  ($0.0095)  [2 txs]
 
 ── Gas summary by action (avg per tx) ──
-  checkpoint                  38352 gas/tx (relay)  [4 txs, <=3 per flow]
-  operator withdraw            8515 gas/tx (relay)  [2 txs]
-  stablecoin approval          5119 gas/tx (user )  [2 txs, once per account]
-  voucher assignment          16408 gas/tx (relay)  [4 txs]
-  voucher issuance            16666 gas/tx (user )  [2 txs]
-  voucher redemption          15924 gas/tx (relay)  [4 txs]
+  operator withdraw            3255 gas/tx (relay)  [2 txs]
+  stablecoin approval          3907 gas/tx (user )  [2 txs, once per account]
+  voucher assignment          25154 gas/tx (relay)  [4 txs]
+  voucher issuance            16079 gas/tx (user )  [2 txs]
+  voucher redemption          18319 gas/tx (relay)  [4 txs]
 
 19/19 steps passed
 ```
 
-(Exact numbers depend on the upstream block fork and the runtime version
-at the time of the snapshot. The ranges are stable; storage deposits
-dominate.)
-
-> **Note:** the numbers above were captured against the BATCH=1 PoC.
-> Since then, `checkpoint()` was upgraded to a B_MAX=8 batched extrinsic
-> with the Merkle frontier stored on-chain (issues #2 + #3). Per-flow
-> cost is expected to drop because one checkpoint now covers up to 8
-> leaves, while each individual checkpoint extrinsic becomes more
-> expensive (~20 extra SSTOREs for the frontier). Re-run the chopsticks
-> e2e to refresh.
+These are pallet-revive (REVM) gas units — note there is **no checkpoint
+row**: the Merkle insert cost is now folded into each buy/assign/redeem.
+All-in per voucher lifecycle is ~0.11 DOT/PAS, and storage deposit is 0
+(pallet-revive folds it into the inclusion fee). Per-tx cost is independent
+of tree depth (Tornado frontier = constant 20 Poseidon hashes per insert),
+so these hold at a full tree. Exact numbers depend on the upstream fork +
+runtime snapshot; the ranges are stable.
 
 Useful env vars:
 
@@ -285,8 +286,7 @@ Useful env vars:
   instance.
 
 See [`docs/gas-design.md`](./docs/gas-design.md) for the analytical
-breakdown of these numbers and the stream+checkpoint design that drove
-them.
+breakdown of these numbers and the on-chain Tornado-frontier insert design.
 
 ### Playwright UI variant
 
@@ -298,6 +298,9 @@ IDB, signer wiring, render diffing) on top of the same chain backend:
 ```bash
 # one-time: download the chromium build Playwright uses
 pnpm --filter @community-credits/browser-test run install-browsers
+# (on an OS Playwright doesn't recognise — e.g. Ubuntu 26.04 — the install
+#  aborts at an OS-support check; bypass with
+#  PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 for both install + test.)
 
 # full UI flow on hardhat-local (auto-spawns hardhat, deploys, runs dapps):
 pnpm --filter @community-credits/browser-test test
@@ -312,8 +315,6 @@ pnpm --filter @community-credits/browser-test run test:headed
 The Playwright suite includes both the happy path and an adversary
 suite (`test/browser/tests/adversary.spec.mjs`: over-balance buy,
 over-spend assign, double-spend, over-redeem, withdraw with no credit).
-The chopsticks limitation above applies here too — the heavy-op txs
-hit the same per-extrinsic cap.
 
 ## Testnet Interactive Demo
 
@@ -331,6 +332,6 @@ unchanged against a real chain — what's missing is the demo glue.
 ## See also
 
 - [`docs/tutorial.md`](./docs/tutorial.md) — step-by-step walkthrough.
-- [`docs/gas-design.md`](./docs/gas-design.md) — stream+checkpoint design + per-step gas analysis.
+- [`docs/gas-design.md`](./docs/gas-design.md) — on-chain Tornado-frontier design + per-step gas analysis.
 - [`CLAUDE.md`](./CLAUDE.md) — session-learned gotchas (toolchain quirks, chopsticks bugs, etc.).
 - [`community-credits-poc-plan.md`](./community-credits-poc-plan.md) — spec.
