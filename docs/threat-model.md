@@ -142,11 +142,17 @@ all three reduce to "no per-community on-chain attribution."
 - **Censor / coercer.** Combines on-chain inference with off-chain pressure; succeeds if
   it can attribute on-chain activity to a specific community or learn an operator's
   customer set.
+- **Indexer / data provider (honest-but-curious).** A node that serves chain state and
+  Merkle authentication paths to light clients (a wallet scanning for its notes, a community
+  fetching the path to build a redemption proof). It follows the protocol but observes
+  *which* leaves/notes a client asks for — a query-pattern channel distinct from the on-chain
+  observer (see T8 / §6.2).
 
-**Assumptions:** SimpleX provides metadata-private membership/messaging; users apply
-anonymization precautions to their on-chain pseudonym; circuits and the on-chain
-Poseidon are byte-equal so proofs are sound; the chain and all events are public and
-permanent.
+**Assumptions:** SimpleX provides metadata-private membership/messaging *and* the onion
+transport over which clients reach indexers (so the *querier's identity* is hidden even if
+the *query content* is not); users apply anonymization precautions to their on-chain
+pseudonym; circuits and the on-chain Poseidon are byte-equal so proofs are sound; the chain
+and all events are public and permanent.
 
 ## 5. Properties to preserve
 
@@ -173,7 +179,8 @@ Integrity / availability:
 
 - **I1** No double-spend (nullifiers), **I2** no value creation / solvency holds,
   **I3** no theft or reroute of value, **I4** the service cannot be cheaply griefed into
-  insolvency or state exhaustion.
+  insolvency or state exhaustion, **I5** zero-trust settlement — the operator↔network
+  revenue split is contract-enforced, not trusted.
 
 **Meta-property (governing principle):** for every privacy property, the on-chain layer
 must be *at least as strong* as SimpleX — it may not re-expose membership or community
@@ -184,6 +191,8 @@ attribution that the messaging layer hides.
 The community is cryptographically hidden in every operation, so the observer never sees
 a community label. The residual risk is **reconstructing community-level attribution
 from public metadata** — chiefly the operator, the amounts, and the expiration height.
+T1–T7 are on-chain leaks; T8 is the one off-chain exception (the indexer read path),
+listed here so the threat set is complete.
 
 - **T1 — Pseudonym at entry.** `buyAndCreate` exposes a buyer pseudonym + `value`.
   *Accepted and bounded*: it must reveal only "an address bought `V`," never a community
@@ -210,10 +219,17 @@ from public metadata** — chiefly the operator, the amounts, and the expiration
   and consume the shared Merkle tree's leaves, limited only by proving effort.
 - **T7 — Dusting / tainting.** Uniquely-valued micro-notes used to fingerprint and trail
   a user/community.
+- **T8 — Query-pattern leak to indexers (off-chain read path).** To build a proof a client
+  fetches the Merkle path for the leaf it cares about, and to find incoming notes a wallet
+  scans the tree; the indexer serving those reads learns *which* leaf/note the client wants,
+  even when onion transport hides *who* is asking. A deanonymization channel parallel to the
+  on-chain one, against P1/P2/P4. Detailed in §6.2.
 
-**Explicitly *not* threats in this model:** a relay learning the community it serves
-(off-chain, accepted); operator identity and *aggregate* turnover being public (P6,
-desired). We do not spend effort hiding those.
+**Explicitly *not* threats in this model (deliberate disclosures):** a relay learning the
+community it serves (off-chain, accepted); operator identity and *aggregate* turnover being
+public (P6, desired); the **total stablecoin held by the pool** (TVL); and the **per-cohort
+totals revealed when an expired bucket is reclaimed** — reclaim is aggregate-only and on a
+verifiable per-bucket proof, never per-credit. We do not spend effort hiding these.
 
 ### 6.1 Current PoC shortcomings vs the whitepaper goals
 
@@ -239,6 +255,36 @@ to commitments via nullifier + ZK membership (P4, I1), assignment hides amount a
 community (the commitments carry the value), and solvency/operator-registry/expiry-reclaim
 hold (I2/I3).
 
+### 6.2 Private blockchain access (query privacy) — an uncovered channel
+
+Everything in §6 so far concerns what an observer reads from the *public ledger*. There is a
+second, orthogonal channel the whitepaper treats as a first-class concern (its
+"Private Blockchain Access" section) and which this PoC does **not** address: the
+**off-chain read path**. A client cannot act on commitments it cannot see — to spend a note
+it must obtain that leaf's Merkle authentication path, and to notice an incoming note it must
+scan the tree. Those reads go to an **indexer / data provider**, and they leak.
+
+Two sub-channels, deliberately separated:
+
+- **Querier identity** — *who* is reading. Handled by routing client→indexer requests over
+  SimpleX's onion transport, so the indexer cannot tie a query to a network identity. This
+  rides on the "do not weaken SimpleX" assumption and is the part the messaging layer already
+  covers.
+- **Query content** — *which* leaf/note/path is requested. **Not** handled by onion routing:
+  the indexer still sees the specific leaf index or note tag it is asked for. Repeated path
+  fetches for the leaves of one community's notes, or a scan keyed to a recognizable note
+  tag, re-introduce exactly the per-community linkage (P1/P2/P4) that the on-chain design
+  works to remove — only now to the data provider rather than the chain observer.
+
+Mitigation directions (none implemented in the PoC): a **private-information-retrieval**-style
+read so the indexer learns nothing about the index requested; fetching **whole subtrees / batched
+ranges** so an individual leaf is hidden in a larger set; running a **local light client**
+(e.g. smoldot) that syncs headers and reconstructs paths without per-leaf queries; or
+**oblivious / decoy** query patterns. The PoC's dapps read the chain directly (the chat dapp
+via a read-only RPC, rebuilding its mirror from events) and so make no attempt at query
+privacy — acceptable for a PoC, but a genuine gap against the whitepaper bar that must be
+closed for production. Tracked as T8.
+
 ## 7. Mitigations and requirements
 
 Mapping threats to controls; "status" reflects the current PoC. The first four rows are
@@ -254,7 +300,8 @@ the privacy-hardening backlog that brings the PoC up to the whitepaper goals.
 | **Operator multi-tenancy** (operators must mix many communities) — fallback for residual bucketing once the above land | T2 / P3 | **Required (deployment)** — single-tenant operators cannot be fully protected on-chain                 |
 | Community as a **private** input (`redeemerHash`) in assign & redeem    | P1, P2, P3       | **Implemented**                                                                                        |
 | Nullifier + ZK Merkle membership → spends unlinkable to commitments     | P4, I1           | **Implemented**                                                                                        |
-| Solvency invariant, operator registry, epoch expiry/reclaim             | I2, I3           | **Implemented**                                                                                        |
+| Solvency invariant, operator registry, epoch expiry/reclaim, contract-enforced revenue split | I2, I3, I5 | **Implemented**                                                                                        |
+| **Private blockchain access** — PIR / batched-subtree reads / local light client (smoldot) / decoy queries, over onion transport, so the indexer learns neither *who* asks nor *which* leaf | T8; P1/P2/P4 | **Not addressed (PoC)** — dapps read the chain directly; onion transport (querier identity) assumed via SimpleX, query *content* unprotected |
 | **Per-assign fee** (bearer, paid to the includer from note value)       | T6; enables permissionless/replaceable inclusion | **Planned** [#4](https://github.com/epoberezkin/simplex-community-credits-poc/issues/4)                |
 | **Dust floor** (`destValue ≥ MIN`) — caps spam amplification & leaf use | T6 (capacity), T7| **Planned** [#3](https://github.com/epoberezkin/simplex-community-credits-poc/issues/3)                |
 | User anonymization precautions for the pseudonym (out-of-protocol)      | T1               | **Assumed**                                                                                            |
@@ -330,9 +377,10 @@ on-chain as they are in SimpleX**:
 The whitepaper sets the bar: full purchase→assignment→redemption unlinkability and
 redemption that is unobservable as an event. Wherever a credits-layer disclosure is
 strictly more revealing than that bar — today: arbitrary public amounts (T3), raw
-expiration heights (T5), per-redemption `operatorId` (T2), and immediate withdrawals
-(T4) — that is a gap to close before the system can be said to meet the whitepaper goals
-and to "not weaken" SimpleX. §6.1 and §7 track those gaps and their mitigations.
+expiration heights (T5), per-redemption `operatorId` (T2), immediate withdrawals (T4), and
+the unprotected indexer read path (T8) — that is a gap to close before the system can be said
+to meet the whitepaper goals and to "not weaken" SimpleX. §6.1, §6.2, and §7 track those gaps
+and their mitigations.
 
 ## 9. Residual risks and open items
 
@@ -360,6 +408,11 @@ and to "not weaken" SimpleX. §6.1 and §7 track those gaps and their mitigation
   pseudonym is not linked to a community or to membership.
 - **Proving-bound griefing/state growth (T6)** is open until the per-assign fee + dust
   floor land.
+- **Query-pattern leak to indexers (T8)** is entirely unaddressed in the PoC: onion transport
+  is assumed for querier identity, but query *content* (which leaf/note a client reads) is
+  exposed to the data provider. Closing it needs PIR / batched reads / a local light client —
+  none implemented. This is the one whitepaper threat-class the on-chain hardening does not
+  touch.
 
 See `docs/gas-design.md` for the on-chain mechanics and measured costs, the
 Community Credits whitepaper for the full privacy goals and the sketched
