@@ -250,7 +250,7 @@ the privacy-hardening backlog that brings the PoC up to the whitepaper goals.
 | **Hide the redemption amount** (`redeemValue`) — commit the value per redeem, reveal only the **aggregate** at withdraw (F1/F2-compatible: the operator still gets cleartext off-band, redeem stays immediate). *Target:* committed **payout notes** — hides amount *and* operator together (next row). *Alternatives:* a committed per-operator balance with the operator still named (lighter, but leaves the per-operator redeem count/timing channel); AHE/ElGamal (deprioritized — its no-off-band-secret edge is moot once F1 mandates off-band delivery); fixed redemption denominations (cleartext low-cardinality, weakest). **Bundling several redeems into one is ruled out by F2.** | T3 (redeem); P3/P5 | **Open — target is committed payout notes**                   |
 | **Quarterly expiry bucketing** — client aligns each note's `expiryEpoch` to a coarse boundary (e.g. a quarter), so a wide range of purchases collapses to one published height | T5; P4/P5 | **Planned (client-side)** [#5](https://github.com/epoberezkin/simplex-community-credits-poc/issues/5) |
 | **Payout-note unbinding** — `redeem` produces a sealed payout note to a community/operator commitment, included for a **bearer fee** by any non-operator submitter (so the immediate, undelayable redeem of §2.1/F2 does not leak the operator via its tx sender) instead of naming `operatorId`; the operator later withdraws its accumulated total proving only that it is registered. If the payout note's value is *committed* rather than public, this also hides `redeemValue`, subsuming the redeem-amount row above | T2 + T3-redeem (value committed); P3/P5 (removes per-redemption operator) | **To be defined** — the whitepaper's "redemption-privacy gap" closure                                  |
-| **Exit buffering** — accrue to `credit`, aggregate withdrawals on the operator's own schedule and on a delay; never 1:1 | T4; P5 | **Partial** — credit/withdraw exists; batching is behavioral, not enforced                             |
+| **Batched withdraw, enforced in-circuit** — withdraw proves `count ≥ N` ∨ `age ≥ T` over the payout notes it aggregates, so only blended aggregates ever settle; *unprovable* (a sub-N withdraw can't be formed), not contract-rejected (a reverted withdraw would still leak its aggregate to the mempool). Supersedes the behavioral exit buffer (accrue to `credit`, no 1:1). `N`, `T` are open deployment parameters | T4; P5 | **Planned (in-circuit)** — currently credit/withdraw exists but batching is behavioral, not enforced |
 | **Operator multi-tenancy** (operators must mix many communities) — fallback for residual bucketing once the above land | T2 / P3 | **Required (deployment)** — single-tenant operators cannot be fully protected on-chain                 |
 | Community as a **private** input (`redeemerHash`) in assign & redeem    | P1, P2, P3       | **Implemented**                                                                                        |
 | Nullifier + ZK Merkle membership → spends unlinkable to commitments     | P4, I1           | **Implemented**                                                                                        |
@@ -286,10 +286,24 @@ Notes:
   batched, amount-privacy must take the *commit-now / reveal-aggregate-at-withdraw* shape —
   not delaying or bundling redeems, which F2 forbids. The "size-one batch leaks" caveat
   therefore binds the *withdraw* cadence, not service: an operator serves immediately off-band
-  but should accumulate ≥2 redemptions before each withdraw. And since the immediate redeem
+  but must accumulate ≥N redemptions before each withdraw (enforced in-circuit, next note). And since the immediate redeem
   event cannot be hidden, only emptied of content, the committed-**payout-note** (operator-
   hidden) form is preferred over a committed but operator-*named* balance, whose per-operator
   redeem count and timing still leak.
+- **Withdraw batching is unprovable, not punished.** The `count ≥ N` ∨ `age ≥ T` floor is a
+  *circuit constraint*, so a sub-N withdraw cannot be turned into a valid proof — there is no
+  failing tx to broadcast. A contract-level `require()` would not achieve this: a reverted
+  withdraw still leaks its aggregate to the mempool, so a reject is too late. Economic
+  *punishment* of small batches is deliberately **not** used: the only actor who would push a
+  revealing small withdraw is the operator, which already holds the cleartext off-band (F1)
+  and can sell it to a censor off-chain for free — so on-chain punishment taxes a method the
+  leaker doesn't need, adds a slashing/griefing surface, and reaches no off-chain whisper;
+  unprovability removes the *verifiable* leak vector instead. Two honest limits: ≥N is a
+  *granularity floor*, not a guarantee — a single-tenant operator's batch still sums to its
+  one community regardless of `N`, so the real mixing is tenancy; and the `age ≥ T` escape
+  keeps a low-volume operator's funds from being stranded, at the cost that its eventual aged
+  withdraw is small-batch and leaky — which folds into the known low-tenancy residual. `N` and
+  `T` are left as open deployment parameters.
 - **Quarterly bucketing trades anonymity-set size against linkage.** A coarser bucket
   widens the cohort (more unlinkable) but a redemption then reveals a wider purchase
   window. Fully hiding the cohort requires blind per-bucket updates inside the proof
@@ -330,7 +344,10 @@ and to "not weaken" SimpleX. §6.1 and §7 track those gaps and their mitigation
   bridge entry → operator → community until both close.
 - **Expiration correlation (T5)** is open until quarter-bucketing lands; raw epochs narrow
   redemptions to a fine cohort.
-- **Withdrawal timing (T4)** depends on operator behavior until aggregation is enforced.
+- **Withdrawal timing (T4)** is behavioral until the in-circuit `count ≥ N` ∨ `age ≥ T`
+  withdraw floor lands; even after, it is a *granularity floor* (a single-tenant batch still
+  sums to one community) and aged low-volume withdraws stay small-batch — both fold into the
+  low-tenancy residual. `N`, `T` open.
 - **Redeem-event cadence is unavoidably public (F2).** `redeem` cannot be batched (double-
   spend protection), so the stream of redeem events and their timing is always visible;
   privacy then depends on each event carrying no operator/amount (committed payout notes),
