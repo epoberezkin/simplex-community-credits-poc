@@ -55,6 +55,43 @@ The nullifier + ZK membership proof make each spend unlinkable to the commitment
 consumes, so `buy → assign → redeem` cannot be chained on-chain except by amount/timing
 correlation — which the denomination and bucketing mitigations are designed to defeat.
 
+### 2.1 Operator-visible vs public, and transaction timing
+
+A foundational distinction runs through this model: what an operator learns **off-band**
+(immediately, over SimpleX) is separate from what is **public on-chain**. The community
+generates each redemption proof and hands the operator the cleartext `(value, opening)` in
+the redemption message; the chain need only carry a hiding commitment. The operator
+therefore knows the amount (and, as accepted in §3, the community) in real time, while an
+on-chain observer does not. Two functional requirements pin this down:
+
+- **F1 — Undelayed service.** An operator must learn a redemption's value the instant it
+  receives the redemption, so tiered service starts without delay. *Satisfied off-band* —
+  the redemption message carries the cleartext; the chain need not. This forbids any scheme
+  that hides the amount from the *payee*, but it does **not** require revealing it publicly.
+- **F2 — Double-spend protection.** An operator is protected against a re-spent or
+  doubly-sent note only by getting its own `redeem`, and thus the note's nullifier, onto the
+  chain. Verifying the proof off-band and checking the nullifier is only a snapshot; the
+  spend is secured solely by winning the nullifier on-chain. So `redeem` must be submitted
+  **immediately**, never batched.
+
+These give three timing tiers; only the last is batchable, and amount-privacy lives there:
+
+| Step       | Timing                | Carries on-chain                                                          |
+|------------|-----------------------|--------------------------------------------------------------------------|
+| `redeem`   | **immediate** (F2)    | nullifier (public), **committed** value, change commitment; operator hidden if payout notes (§7) are used |
+| service    | immediate, off-band   | nothing (SimpleX message)                                                |
+| `withdraw` | **batched / delayed** | the **aggregate** cleartext earning                                      |
+
+Two consequences follow. First, because `redeem` cannot be delayed, the *event and its
+timing* are unavoidably public — there is one on-chain redeem per redemption, and
+"redemption unobservable as an event" (P5) means it carries **no identifying content** (no
+amount, no operator, no cohort), not that the transaction is invisible. Second, an event you
+cannot delay must *identify no one*: if the operator self-submits its immediate redeem from a
+known address, the **tx sender re-leaks `operatorId`** even when the payload hides it — so
+`redeem` must be included by a non-operator address (the permissionless **bearer-fee
+includer** path of §7, or a rotated throwaway), with the operator's protection resting on
+prompt, fee-incentivized inclusion.
+
 ## 3. Stakeholders: interests, anonymity, and disclosure
 
 | Stakeholder         | Core interest                                                   | What "anonymity" means for them                          | Must stay hidden                                                                 | May / should be public                                             |
@@ -125,7 +162,9 @@ Privacy (the targets; §6.1 marks which are not yet met):
 - **P5 — Redemption unobservability (whitepaper goal).** An individual redemption reveals
   neither its **amount**, the **operator** paid, nor the **expiration cohort**, and
   redemptions are mutually unlinkable. Only *aggregate* operator earnings, surfaced at
-  withdrawal, are public.
+  withdrawal, are public. (The redeem *transaction* and its timing remain public — F2 forbids
+  hiding them; "unobservable as an event" means it carries no identifying content, not that
+  no transaction appears.)
 - **P6 — Operator transparency (a deliberate disclosure).** Operator identity and
   *aggregate* turnover are public at withdrawal; this is desired, not a leak. It does
   **not** extend to per-redemption operator linkage (that is hidden under P5).
@@ -202,15 +241,15 @@ hold (I2/I3).
 
 ## 7. Mitigations and requirements
 
-Mapping threats to controls; "status" reflects the current PoC. The first three rows are
+Mapping threats to controls; "status" reflects the current PoC. The first four rows are
 the privacy-hardening backlog that brings the PoC up to the whitepaper goals.
 
 | Control                                                                 | Addresses        | Status                                                                                                 |
 |-------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------------|
 | **Fixed issuance denominations** — mint vouchers (`value` at `buyAndCreate`) only in a small standard set, so the public entry amount is low-cardinality and the buy→redeem bridge faces a large anonymity set | T3 (entry), T1-bridge, T7 | **Planned** — [#6](https://github.com/epoberezkin/simplex-community-credits-poc/issues/6)              |
-| **Hide the redemption amount** (`redeemValue`) — a community cashes out an *arbitrary accumulated* balance, so there is no single clean fix. *Options:* (a) fixed redemption denominations (redeem in standard chunks, remainder as change); (b) fold the amount into payout-note unbinding (committed, not cleartext); (c) AHE-aggregated per operator | T3 (redeem); P3/P5 | **Open — option space, not yet chosen** (fixed denominations is only *one* of these)                   |
-| **Quarterly expiry bucketing** — client aligns each note's `expiryEpoch` to a coarse boundary (e.g. a quarter), so a wide range of purchases collapses to one published height | T5; P4/P5 | **Planned (client-side)** [#5](https://github.com/epoberezkin/simplex-community-credits-poc/issues/5)] |
-| **Payout-note unbinding** — `redeem` produces a sealed payout note to a community/operator commitment + bearer fee to the includer instead of naming `operatorId`; the operator later withdraws its accumulated total proving only that it is registered. If the payout note's value is *committed* rather than public, this also hides `redeemValue` (= redeem-side option (b) above) | T2 (+ T3-redeem if value committed); P3/P5 (removes per-redemption operator) | **To be defined** — the whitepaper's "redemption-privacy gap" closure                                  |
+| **Hide the redemption amount** (`redeemValue`) — commit the value per redeem, reveal only the **aggregate** at withdraw (F1/F2-compatible: the operator still gets cleartext off-band, redeem stays immediate). *Target:* committed **payout notes** — hides amount *and* operator together (next row). *Alternatives:* a committed per-operator balance with the operator still named (lighter, but leaves the per-operator redeem count/timing channel); AHE/ElGamal (deprioritized — its no-off-band-secret edge is moot once F1 mandates off-band delivery); fixed redemption denominations (cleartext low-cardinality, weakest). **Bundling several redeems into one is ruled out by F2.** | T3 (redeem); P3/P5 | **Open — target is committed payout notes**                   |
+| **Quarterly expiry bucketing** — client aligns each note's `expiryEpoch` to a coarse boundary (e.g. a quarter), so a wide range of purchases collapses to one published height | T5; P4/P5 | **Planned (client-side)** [#5](https://github.com/epoberezkin/simplex-community-credits-poc/issues/5) |
+| **Payout-note unbinding** — `redeem` produces a sealed payout note to a community/operator commitment, included for a **bearer fee** by any non-operator submitter (so the immediate, undelayable redeem of §2.1/F2 does not leak the operator via its tx sender) instead of naming `operatorId`; the operator later withdraws its accumulated total proving only that it is registered. If the payout note's value is *committed* rather than public, this also hides `redeemValue`, subsuming the redeem-amount row above | T2 + T3-redeem (value committed); P3/P5 (removes per-redemption operator) | **To be defined** — the whitepaper's "redemption-privacy gap" closure                                  |
 | **Exit buffering** — accrue to `credit`, aggregate withdrawals on the operator's own schedule and on a delay; never 1:1 | T4; P5 | **Partial** — credit/withdraw exists; batching is behavioral, not enforced                             |
 | **Operator multi-tenancy** (operators must mix many communities) — fallback for residual bucketing once the above land | T2 / P3 | **Required (deployment)** — single-tenant operators cannot be fully protected on-chain                 |
 | Community as a **private** input (`redeemerHash`) in assign & redeem    | P1, P2, P3       | **Implemented**                                                                                        |
@@ -235,12 +274,22 @@ Notes:
   not factor into per-community figures (P3/P5), matching the whitepaper.
 - **Redemption-amount options compared.** Fixed redemption denominations make every
   `redeemValue` indistinguishable *unconditionally*, at the cost of more notes/leaves and
-  the awkwardness of forcing an arbitrary balance into standard chunks. AHE keeps amounts
-  encrypted while proving aggregate turnover, but relies on the operator batching before the
-  aggregate is revealed (a size-one batch leaks the amount). Committed payout notes hide
-  `redeemValue` as a by-product of the operator-unbinding mechanism (T2), so if that lands
-  it may make a separate denomination scheme on the redeem leg unnecessary — which is why
-  redemption denominations are recorded as *one option*, not the plan.
+  the awkwardness of forcing an arbitrary balance into standard chunks. AHE/ElGamal keeps
+  amounts encrypted while proving aggregate turnover, but relies on the operator batching
+  before the aggregate is revealed (a size-one batch leaks the amount), and its one
+  advantage — the operator decrypting without an off-band secret — is moot once F1 mandates
+  an off-band cleartext channel anyway. Committed payout notes hide `redeemValue` as a
+  by-product of the operator-unbinding mechanism (T2), so they close the amount and operator
+  channels at once — which is why they are the target and a separate redeem-leg denomination
+  scheme is only a fallback.
+- **Immediacy reshapes the choice (F1/F2).** Because `redeem` is immediate and `withdraw` is
+  batched, amount-privacy must take the *commit-now / reveal-aggregate-at-withdraw* shape —
+  not delaying or bundling redeems, which F2 forbids. The "size-one batch leaks" caveat
+  therefore binds the *withdraw* cadence, not service: an operator serves immediately off-band
+  but should accumulate ≥2 redemptions before each withdraw. And since the immediate redeem
+  event cannot be hidden, only emptied of content, the committed-**payout-note** (operator-
+  hidden) form is preferred over a committed but operator-*named* balance, whose per-operator
+  redeem count and timing still leak.
 - **Quarterly bucketing trades anonymity-set size against linkage.** A coarser bucket
   widens the cohort (more unlinkable) but a redemption then reveals a wider purchase
   window. Fully hiding the cohort requires blind per-bucket updates inside the proof
@@ -282,6 +331,11 @@ and to "not weaken" SimpleX. §6.1 and §7 track those gaps and their mitigation
 - **Expiration correlation (T5)** is open until quarter-bucketing lands; raw epochs narrow
   redemptions to a fine cohort.
 - **Withdrawal timing (T4)** depends on operator behavior until aggregation is enforced.
+- **Redeem-event cadence is unavoidably public (F2).** `redeem` cannot be batched (double-
+  spend protection), so the stream of redeem events and their timing is always visible;
+  privacy then depends on each event carrying no operator/amount (committed payout notes),
+  giving an anonymity set of *all* system redeems rather than per-operator. A committed but
+  operator-named balance leaves this cadence attributable.
 - **Entry value `V` is public** at purchase until denominations standardize it.
 - **Low-tenancy operators** cannot be fully protected on-chain even after the above; this
   is an operator-set/economic property, not something the chain can fix.
