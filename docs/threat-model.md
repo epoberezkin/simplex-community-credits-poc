@@ -73,6 +73,17 @@ on-chain observer does not. Two functional requirements pin this down:
   chain. Verifying the proof off-band and checking the nullifier is only a snapshot; the
   spend is secured solely by winning the nullifier on-chain. So `redeem` must be submitted
   **immediately**, never batched.
+- **F3 — Governance reclaim accounting.** The SimpleX Governance Body (§3.4) must be able to
+  learn, per expiry bucket, the value left **unredeemed** at — or any time after — the
+  bucket's expiry, so the remainder can be swept to it. *Must be satisfied in aggregate*: the
+  per-bucket total may be revealed once, at/after expiry, but **not** via a public counter
+  incremented on each redeem, which would re-leak the individual redeem amount that P5/§7
+  hide. Because the bucket key (`expiryEpoch`) is already public, per-bucket accumulation adds
+  no operator/community linkage (the per-operator objection of §7 does not apply). The bucket
+  aggregate is obtained **by proof, not decryption** — there must be **no read/decryption key**
+  that could open an individual redeem amount (a permanent ledger would turn one leaked key into a
+  retroactive master key). The adopted construction derives it from operators' own `withdraw`
+  proofs (§7).
 
 These give three timing tiers; only the last is batchable, and amount-privacy lives there:
 
@@ -99,6 +110,7 @@ prompt, fee-incentivized inclusion.
 | **User / member**   | Subscribe to a paywalled community without exposing it          | Their **membership is unlinkable** — to anyone           | Which community they belong to / pay into; any link from their pseudonym to a community or to other members | Their pseudonymous buy address, and that *some* address bought value `V` |
 | **Community admin** | Run a paywalled community, collect payments, cash out, get tiered relay service | The **community is unattributable on-chain**             | The community's identity to the public; any per-community decomposition of on-chain activity; the member roster | The community's identity **to its own relay operator(s)**, off-chain, to access tiered service |
 | **Relay operator**  | Run a transparent, accountable cash-out/relay service, earn fees | **Customer-set privacy** (they are not themselves anonymous) | **Which communities it serves**, and any *per-redemption* operator linkage that lets its aggregate be decomposed | Its identity and its **aggregate turnover/throughput** — public *by design*, at withdrawal granularity |
+| **SimpleX Governance Body** | Fund SW development & network-common interests from protocol revenue — a fixed fraction of every withdrawal, plus the *unredeemed* remainder of each expiry bucket | None — a transparent public recipient; everything it receives is aggregate by design | Nothing of its own; but its accounting **must not require per-redeem amounts** to be disclosed | Its address; the revenue-split fraction; the **per-bucket unredeemed total** it sweeps at expiry (aggregate, never per-redeem) |
 
 ### 3.1 Users (members / subscribers)
 
@@ -130,6 +142,21 @@ serve, and do not let individual redemptions be attributed to them** — because
 exposes their customer communities to targeting/censorship and makes the operator a
 coercion point. This interest is *aligned* with the communities' and users' interests:
 all three reduce to "no per-community on-chain attribution."
+
+### 3.4 SimpleX Governance Body
+
+A protocol-level recipient that funds ongoing software development and other
+network-common interests. It draws two revenue streams, both **aggregate and public by
+design**: (a) a fixed fraction of every operator `withdraw` — taken from an already-public
+aggregate (P6), so it adds no new disclosure; and (b) the entire **unredeemed remainder** of
+an expiry bucket, swept to it at or after the bucket expires. The body needs no anonymity.
+Its *only* threat-model constraint is on **how** stream (b) is computed: it must obtain each
+bucket's unredeemed total **in aggregate**, and the protocol must not derive that figure from
+a per-redeem running tally **nor a governance-held decryption key over per-redeem ciphertexts**
+(see F3 and the reclaim-accounting mitigation in §7): the tally is the per-redemption amount leak
+(T3) the redemption-privacy work removes, and the key would be a master key over every amount on a
+permanent ledger — one leak de-anonymizes all of them retroactively. The bucket total must be
+**proven in aggregate, never decrypted**.
 
 ## 4. Adversaries and trust assumptions
 
@@ -181,8 +208,10 @@ Integrity / availability:
 
 - **I1** No double-spend (nullifiers), **I2** no value creation / solvency holds,
   **I3** no theft or reroute of value, **I4** the service cannot be cheaply griefed into
-  insolvency or state exhaustion, **I5** zero-trust settlement — the operator↔network
-  revenue split is contract-enforced, not trusted.
+  insolvency or state exhaustion, **I5** zero-trust settlement — the operator↔governance
+  revenue split (a fraction of each withdrawal) **and** the sweep of each expiry bucket's
+  unredeemed remainder to the SimpleX Governance Body (§3.4) are contract-enforced, not
+  trusted, and computed from aggregates, never from per-redeem disclosures (F3).
 
 **Meta-property (governing principle):** for every privacy property, the on-chain layer
 must be *at least as strong* as SimpleX — it may not re-expose membership or community
@@ -231,9 +260,10 @@ listed here so the threat set is complete.
 
 **Explicitly *not* threats in this model (deliberate disclosures):** a relay learning the
 community it serves (off-chain, accepted); operator identity and *aggregate* turnover being
-public (P6, desired); the **total stablecoin held by the pool** (TVL); and the **per-cohort
-totals revealed when an expired bucket is reclaimed** — reclaim is aggregate-only and on a
-verifiable per-bucket proof, never per-credit; and the **query content a relay's light client
+public (P6, desired); the **total stablecoin held by the pool** (TVL); and the **per-bucket
+unredeemed total revealed when an expired bucket is swept** to the SimpleX Governance Body
+(§3.4) — aggregate-only, on a verifiable per-bucket proof at/after expiry, **never** a
+per-redeem running tally; and the **query content a relay's light client
 sees** when it serves chain reads (the querier's identity is onion-hidden — see §6.2 / T8).
 We do not spend effort hiding these.
 
@@ -247,6 +277,12 @@ Honest status of where the PoC is weaker than the target:
 - **Amounts are arbitrary and public (T3).** `value` / `redeemValue` / `withdraw amount`
   are free-form, so they fingerprint redemptions and bridge entry→operator→community.
   Violates **P3/P5** and weakens **P1**. *Target:* amounts are indistinguishable.
+- **Reclaim accounting leaks per-redeem amounts (T3).** The contract keeps a public per-bucket
+  `spent[expiryEpoch]`, incremented by `redeemValue` on every redeem, to compute the unredeemed
+  remainder for governance (F3). That running tally exposes each redemption's amount at
+  submission — the same leak §7 closes on the payload — and §7's hiding of `redeemValue` breaks
+  the cleartext increment outright. *Target:* the per-bucket total is accumulated privately and
+  revealed only in aggregate at/after expiry.
 - **Expiration height is published raw (T5).** `assign`/`redeem` expose the exact
   `expiryEpoch`, narrowing redemptions to a fine purchase cohort. Weakens **P4/P5**.
   *Target:* only a coarse cohort is observable.
@@ -295,16 +331,17 @@ relay-light-client + onion path is the production design. Tracked as T8.
 
 ## 7. Mitigations and requirements
 
-Mapping threats to controls; "status" reflects the current PoC. The first four rows are
+Mapping threats to controls; "status" reflects the current PoC. The top rows are
 the privacy-hardening backlog that brings the PoC up to the whitepaper goals.
 
 | Control                                                                 | Addresses        | Status                                                                                                                                                         |
 |-------------------------------------------------------------------------|------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Fixed issuance denominations** — mint vouchers (`value` at `buyAndCreate`) only in a small standard set, so the public entry amount is low-cardinality and the buy→redeem bridge faces a large anonymity set | T3 (entry), T1-bridge, T7 | **Planned** — [#6](https://github.com/epoberezkin/simplex-community-credits-poc/issues/6)                                                                      |
-| **Hide the redemption amount** (`redeemValue`) — commit the value per redeem, reveal only the **aggregate** at withdraw (F1/F2-compatible: the operator still gets cleartext off-band, redeem stays immediate). *Target:* committed **payout notes** — hides amount *and* operator together (next row). *Alternatives:* a committed per-operator balance with the operator still named (lighter, but leaves the per-operator redeem count/timing channel); AHE/ElGamal (**obviated** — aggregation in the withdrawal proof needs no homomorphic encryption, and on-chain accumulation would name the beneficiary; see notes); fixed redemption denominations (cleartext low-cardinality, weakest). **Bundling several redeems into one is ruled out by F2.** | T3 (redeem); P3/P5 | planned [#7](https://github.com/epoberezkin/simplex-community-credits-poc/issues/7)                                                                            |
+| **Hide the redemption amount** (`redeemValue`) — commit the value per redeem, reveal only the **aggregate** at withdraw (F1/F2-compatible: the operator still gets cleartext off-band, redeem stays immediate). *Target:* committed **payout notes** — hides amount *and* operator together (next row). *Alternatives:* a committed per-operator balance with the operator still named (lighter, but leaves the per-operator redeem count/timing channel); AHE/ElGamal (**obviated** — aggregation in the withdrawal proof needs no homomorphic encryption, and on-chain accumulation would name the beneficiary; see notes); fixed redemption denominations (cleartext low-cardinality, weakest). **Bundling several redeems into one is ruled out by F2.** | T3 (redeem); P3/P5 | planned [#9](https://github.com/epoberezkin/simplex-community-credits-poc/issues/9)                                                                            |
 | **Quarterly expiry bucketing** — client aligns each note's `expiryEpoch` to a coarse boundary (e.g. a quarter), so a wide range of purchases collapses to one published height | T5; P4/P5 | **Planned (client-side)** [#5](https://github.com/epoberezkin/simplex-community-credits-poc/issues/5)                                                          |
-| **Payout-note unbinding** — operator-unbinding has **two independent legs, both required**. *Payload:* `redeem` carries a sealed payout note `Poseidon(amount, beneficiary, salt)` to a community/operator commitment instead of naming `operatorId`; the operator gets the opening off-band and later withdraws its accumulated total, the withdrawal proof showing only that it is the registered beneficiary of notes summing to the claimed aggregate. If the note's value is *committed* (not public) this also hides `redeemValue`, subsuming the redeem-amount row above. *Sender:* the immediate, undelayable redeem (§2.1/F2) must be included by a **non-operator** for a **bearer fee** carved from note value, else the tx sender re-leaks the operator even with the payload hidden | T2 + T3-redeem (value committed); P3/P5 (removes per-redemption operator) | **Planned** — payload leg [#7](https://github.com/epoberezkin/simplex-community-credits-poc/issues/7), sender leg [#8](https://github.com/epoberezkin/simplex-community-credits-poc/issues/8) (the "redemption-privacy gap" closure; #7 depends on #8) |
-| **Batched withdraw, enforced in-circuit** — withdraw proves `count ≥ N` ∨ `age ≥ T` over the payout notes it aggregates, so only blended aggregates ever settle; *unprovable* (a sub-N withdraw can't be formed), not contract-rejected (a reverted withdraw would still leak its aggregate to the mempool). Supersedes the behavioral exit buffer (accrue to `credit`, no 1:1). `N`, `T` are open deployment parameters | T4; P5 | **Planned (in-circuit)**  [#7](https://github.com/epoberezkin/simplex-community-credits-poc/issues/7)|
+| **Payout-note unbinding** — operator-unbinding has **two independent legs, both required**. *Payload:* `redeem` carries a sealed payout note `Poseidon(amount, beneficiary, salt, sourceBucket)` to a community/operator commitment instead of naming `operatorId`; the operator gets the opening off-band and later withdraws its accumulated total, the withdrawal proof showing only that it is the registered beneficiary of notes summing to the claimed aggregate. If the note's value is *committed* (not public) this also hides `redeemValue`, subsuming the redeem-amount row above. *Sender:* the immediate, undelayable redeem (§2.1/F2) must be included by a **non-operator** for a **bearer fee** carved from note value, else the tx sender re-leaks the operator even with the payload hidden | T2 + T3-redeem (value committed); P3/P5 (removes per-redemption operator) | **Planned** — payload leg [#9](https://github.com/epoberezkin/simplex-community-credits-poc/issues/9), sender leg [#8](https://github.com/epoberezkin/simplex-community-credits-poc/issues/8) (the "redemption-privacy gap" closure; #9 depends on #8) |
+| **Batched withdraw, enforced in-circuit** — withdraw proves `count ≥ N` ∨ `age ≥ T` over the payout notes it aggregates, so only blended aggregates ever settle; *unprovable* (a sub-N withdraw can't be formed), not contract-rejected (a reverted withdraw would still leak its aggregate to the mempool). Supersedes the behavioral exit buffer (accrue to `credit`, no 1:1). `N`, `T` are open deployment parameters | T4; P5 | **Planned (in-circuit)**  [#9](https://github.com/epoberezkin/simplex-community-credits-poc/issues/9)|
+| **Private per-bucket reclaim accounting** — derive `redeemed[B]` from operators' own `withdraw` proofs (adopted): each payout note binds its **source bucket** `B`, and a withdrawal proves a **per-bucket subtotal** under the same `count ≥ N ∨ age ≥ T` floor (applied per bucket), so the contract accumulates a public `redeemed[B]` whose every increment already blends ≥`N` redemptions — `N`/`T` tune the per-operator-per-bucket granularity to an acceptable level. After `B` expires, the contract finalizes `redeemed[B]` (operators withdraw B-notes within a bounded window or forfeit — a parameter) and sweeps `unredeemed[B] = minted[B] − redeemed[B]` to the Governance Body; operators hold their own note openings via F1, so **no key and no abandoned-note openings are needed**. **AHE rejected** — encrypting each amount under a governance key makes the per-redeem ciphertexts individually decryptable, so one ever-leaked key would retroactively expose every amount on the permanent ledger. A per-bucket **Pedersen accumulator** also hides individuals, but opening its sum without concentrating the blindings in one party (itself a read-key-equivalent) is logistically hard — not pursued. | T3 (reclaim); F3; I5 | **Planned** — folded into [#9](https://github.com/epoberezkin/simplex-community-credits-poc/issues/9); PoC tallies `spent[]` in cleartext per redeem |
 | **Operator multi-tenancy** (operators must mix many communities) — fallback for residual bucketing once the above land | T2 / P3 | **Required (deployment)** — single-tenant operators cannot be fully protected on-chain                                                                         |
 | Community as a **private** input (`redeemerHash`) in assign & redeem    | P1, P2, P3       | **Implemented**                                                                                                                                                |
 | Nullifier + ZK Merkle membership → spends unlinkable to commitments     | P4, I1           | **Implemented**                                                                                                                                                |
@@ -331,7 +368,7 @@ Notes:
 - **Redemption-amount options compared.** Fixed redemption denominations make every
   `redeemValue` indistinguishable *unconditionally*, at the cost of more notes/leaves and
   forcing an arbitrary balance into standard chunks. Committed **payout notes** — a per-redeem
-  commitment `Poseidon(amount, beneficiary, salt)` whose opening the operator gets off-band
+  commitment `Poseidon(amount, beneficiary, salt, sourceBucket)` whose opening the operator gets off-band
   (F1) — hide `redeemValue` as a by-product of operator-unbinding (T2), closing the amount and
   operator channels at once; at withdrawal the operator sums the openings it holds and proves
   `aggregate = Σ amountᵢ` in-circuit. That is why payout notes are the target and a redeem-leg
@@ -343,7 +380,7 @@ Notes:
   off-band (F1), the aggregation is a plain in-circuit sum over commitments — no homomorphic
   encryption is needed at all. The price is O(N) withdrawal-proof work and an unrecoverable note
   if its opening is lost; both are acceptable (withdrawal is infrequent and runs on operator
-  hardware, not mobile; note recovery is an open item, see #7).
+  hardware, not mobile; note recovery is an open item, see #9).
 - **Immediacy reshapes the choice (F1/F2).** Because `redeem` is immediate and `withdraw` is
   batched, amount-privacy must take the *commit-now / reveal-aggregate-at-withdraw* shape —
   not delaying or bundling redeems, which F2 forbids. The "size-one batch leaks" caveat
@@ -413,6 +450,13 @@ not an open privacy gap. §6.1, §6.2, and §7 track those gaps and their mitiga
   withdraw floor lands; even after, it is a *granularity floor* (a single-tenant batch still
   sums to one community) and aged low-volume withdraws stay small-batch — both fold into the
   low-tenancy residual. `N`, `T` open.
+- **Reclaim accounting (F3/T3)** leaks per-redeem amounts while the contract increments a
+  public `spent[expiryEpoch]`; closed by deriving `redeemed[B]` from operators' `withdraw` proofs
+  as per-bucket subtotals under the `count ≥ N ∨ age ≥ T` floor (§7), so it is **proven in
+  aggregate, never decrypted** — no governance read key (which a permanent ledger would turn into a
+  retroactive master key). Residual: per-operator-per-bucket subtotals are exposed, tuned to
+  acceptability by `N`/`T`. The unredeemed sweep and the withdrawal revenue-split to the SimpleX
+  Governance Body are themselves aggregate-only (P6/I5).
 - **Redeem-event cadence is unavoidably public (F2).** `redeem` cannot be batched (double-
   spend protection), so the stream of redeem events and their timing is always visible;
   privacy then depends on each event carrying no operator/amount (committed payout notes),
