@@ -293,9 +293,9 @@ the privacy-hardening backlog that brings the PoC up to the whitepaper goals.
 | Control                                                                 | Addresses        | Status                                                                                                                                                         |
 |-------------------------------------------------------------------------|------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Fixed issuance denominations** — mint vouchers (`value` at `buyAndCreate`) only in a small standard set, so the public entry amount is low-cardinality and the buy→redeem bridge faces a large anonymity set | T3 (entry), T1-bridge, T7 | **Planned** — [#6](https://github.com/epoberezkin/simplex-community-credits-poc/issues/6)                                                                      |
-| **Hide the redemption amount** (`redeemValue`) — commit the value per redeem, reveal only the **aggregate** at withdraw (F1/F2-compatible: the operator still gets cleartext off-band, redeem stays immediate). *Target:* committed **payout notes** — hides amount *and* operator together (next row). *Alternatives:* a committed per-operator balance with the operator still named (lighter, but leaves the per-operator redeem count/timing channel); AHE/ElGamal (deprioritized — its no-off-band-secret edge is moot once F1 mandates off-band delivery); fixed redemption denominations (cleartext low-cardinality, weakest). **Bundling several redeems into one is ruled out by F2.** | T3 (redeem); P3/P5 | planned [#7](https://github.com/epoberezkin/simplex-community-credits-poc/issues/7)                                                                            |
+| **Hide the redemption amount** (`redeemValue`) — commit the value per redeem, reveal only the **aggregate** at withdraw (F1/F2-compatible: the operator still gets cleartext off-band, redeem stays immediate). *Target:* committed **payout notes** — hides amount *and* operator together (next row). *Alternatives:* a committed per-operator balance with the operator still named (lighter, but leaves the per-operator redeem count/timing channel); AHE/ElGamal (**obviated** — aggregation in the withdrawal proof needs no homomorphic encryption, and on-chain accumulation would name the beneficiary; see notes); fixed redemption denominations (cleartext low-cardinality, weakest). **Bundling several redeems into one is ruled out by F2.** | T3 (redeem); P3/P5 | planned [#7](https://github.com/epoberezkin/simplex-community-credits-poc/issues/7)                                                                            |
 | **Quarterly expiry bucketing** — client aligns each note's `expiryEpoch` to a coarse boundary (e.g. a quarter), so a wide range of purchases collapses to one published height | T5; P4/P5 | **Planned (client-side)** [#5](https://github.com/epoberezkin/simplex-community-credits-poc/issues/5)                                                          |
-| **Payout-note unbinding** — `redeem` produces a sealed payout note to a community/operator commitment, included for a **bearer fee** by any non-operator submitter (so the immediate, undelayable redeem of §2.1/F2 does not leak the operator via its tx sender) instead of naming `operatorId`; the operator later withdraws its accumulated total proving only that it is registered. If the payout note's value is *committed* rather than public, this also hides `redeemValue`, subsuming the redeem-amount row above | T2 + T3-redeem (value committed); P3/P5 (removes per-redemption operator) | **To be defined** — the whitepaper's "redemption-privacy gap" closure. candidate: [#8](https://github.com/epoberezkin/simplex-community-credits-poc/issues/8) |
+| **Payout-note unbinding** — operator-unbinding has **two independent legs, both required**. *Payload:* `redeem` carries a sealed payout note `Poseidon(amount, beneficiary, salt)` to a community/operator commitment instead of naming `operatorId`; the operator gets the opening off-band and later withdraws its accumulated total, the withdrawal proof showing only that it is the registered beneficiary of notes summing to the claimed aggregate. If the note's value is *committed* (not public) this also hides `redeemValue`, subsuming the redeem-amount row above. *Sender:* the immediate, undelayable redeem (§2.1/F2) must be included by a **non-operator** for a **bearer fee** carved from note value, else the tx sender re-leaks the operator even with the payload hidden | T2 + T3-redeem (value committed); P3/P5 (removes per-redemption operator) | **To be defined** — the whitepaper's "redemption-privacy gap" closure. candidate: [#8](https://github.com/epoberezkin/simplex-community-credits-poc/issues/8) |
 | **Batched withdraw, enforced in-circuit** — withdraw proves `count ≥ N` ∨ `age ≥ T` over the payout notes it aggregates, so only blended aggregates ever settle; *unprovable* (a sub-N withdraw can't be formed), not contract-rejected (a reverted withdraw would still leak its aggregate to the mempool). Supersedes the behavioral exit buffer (accrue to `credit`, no 1:1). `N`, `T` are open deployment parameters | T4; P5 | **Planned (in-circuit)** — currently credit/withdraw exists but batching is behavioral, not enforced                                                           |
 | **Operator multi-tenancy** (operators must mix many communities) — fallback for residual bucketing once the above land | T2 / P3 | **Required (deployment)** — single-tenant operators cannot be fully protected on-chain                                                                         |
 | Community as a **private** input (`redeemerHash`) in assign & redeem    | P1, P2, P3       | **Implemented**                                                                                                                                                |
@@ -311,24 +311,31 @@ Notes:
 - **The amount channel has two independent legs.** *Issuance* (`value`) and *redemption*
   (`redeemValue`) are mitigated separately. Issuance denominations are planned and simple —
   the issuer mints standard sizes. Redemption is harder because a community cashes out an
-  arbitrary accumulated balance; hiding `redeemValue` is an open choice among fixed
-  redemption denominations, committed payout notes, or AHE. The two legs must *both* close
+  arbitrary accumulated balance; hiding `redeemValue` is closed by committed payout notes
+  (the target), with fixed redemption denominations as a fallback. The two legs must *both* close
   for the buy→redeem amount bridge to be cut: denominated entry alone still leaks if
   `redeemValue` is a distinctive cleartext, and vice-versa.
 - **Closing P3/P5 needs all the channels.** Entry + redeem amounts (above), expiry
-  bucketing (T5), and per-redemption operator removal (T2, payout-note unbinding) must all
+  bucketing (T5), and per-redemption operator removal (T2, payout-note unbinding — both its
+  payload and sender legs) must all
   land before an operator's public withdrawal becomes an *irreducible aggregate* that does
   not factor into per-community figures (P3/P5), matching the whitepaper.
 - **Redemption-amount options compared.** Fixed redemption denominations make every
   `redeemValue` indistinguishable *unconditionally*, at the cost of more notes/leaves and
-  the awkwardness of forcing an arbitrary balance into standard chunks. AHE/ElGamal keeps
-  amounts encrypted while proving aggregate turnover, but relies on the operator batching
-  before the aggregate is revealed (a size-one batch leaks the amount), and its one
-  advantage — the operator decrypting without an off-band secret — is moot once F1 mandates
-  an off-band cleartext channel anyway. Committed payout notes hide `redeemValue` as a
-  by-product of the operator-unbinding mechanism (T2), so they close the amount and operator
-  channels at once — which is why they are the target and a separate redeem-leg denomination
-  scheme is only a fallback.
+  forcing an arbitrary balance into standard chunks. Committed **payout notes** — a per-redeem
+  commitment `Poseidon(amount, beneficiary, salt)` whose opening the operator gets off-band
+  (F1) — hide `redeemValue` as a by-product of operator-unbinding (T2), closing the amount and
+  operator channels at once; at withdrawal the operator sums the openings it holds and proves
+  `aggregate = Σ amountᵢ` in-circuit. That is why payout notes are the target and a redeem-leg
+  denomination scheme only a fallback.
+- **AHE is obviated, not merely deprioritized.** On-chain additively-homomorphic accumulation
+  requires the contract to know *which* per-operator accumulator each redeem adds into — which
+  **names the beneficiary at redeem time**, the exact leak we set out to remove. Deferring the
+  sum to the withdrawal proof avoids that, and since the operator already holds every opening
+  off-band (F1), the aggregation is a plain in-circuit sum over commitments — no homomorphic
+  encryption is needed at all. The price is O(N) withdrawal-proof work and an unrecoverable note
+  if its opening is lost; both are acceptable (withdrawal is infrequent and runs on operator
+  hardware, not mobile; note recovery is an open item, see #7).
 - **Immediacy reshapes the choice (F1/F2).** Because `redeem` is immediate and `withdraw` is
   batched, amount-privacy must take the *commit-now / reveal-aggregate-at-withdraw* shape —
   not delaying or bundling redeems, which F2 forbids. The "size-one batch leaks" caveat
@@ -387,8 +394,8 @@ and their mitigations.
 - **Per-redemption operator (T2)** is public until payout-note unbinding lands; until then
   community privacy degrades to the operator's tenancy.
 - **Amount correlation (T3)** is open on both legs: entry `value` until issuance
-  denominations land (planned); `redeemValue` until a redeem-side option (fixed
-  denominations, committed payout notes, or AHE) is chosen and lands. Distinctive values
+  denominations land (planned); `redeemValue` until the redeem-side target (committed
+  payout notes; fixed denominations as fallback) lands. Distinctive values
   bridge entry → operator → community until both close.
 - **Expiration correlation (T5)** is open until quarter-bucketing lands; raw epochs narrow
   redemptions to a fine cohort.
